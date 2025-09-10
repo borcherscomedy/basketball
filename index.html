@@ -32,9 +32,6 @@
     .crosshair:before, .crosshair:after{content:""; position:absolute; background:#fff}
     .crosshair:before{left:9px; top:0; bottom:0; width:2px}
     .crosshair:after{top:9px; left:0; right:0; height:2px}
-
-    .magnifier{position:absolute; width:120px; height:120px; border:2px solid var(--accent); border-radius:50%; overflow:hidden; display:none; pointer-events:none; z-index:15; background:#000}
-    .magnifier canvas{width:100%; height:100%}
   </style>
 </head>
 <body>
@@ -45,7 +42,6 @@
       <video id="video" playsinline muted></video>
       <canvas class="overlay" id="overlay"></canvas>
       <div class="crosshair" id="crosshair" style="display:none"></div>
-      <div class="magnifier" id="magnifier"><canvas id="magCanvas"></canvas></div>
     </section>
 
     <section class="card">
@@ -54,11 +50,11 @@
         <button id="btnCalib">Calibrate</button>
         <button id="btnEdit">Edit line</button>
         <label><input type="checkbox" id="chkOffset" checked> Offset finger</label>
-        <label>Offset px <input type="range" id="offsetPx" min="20" max="100" value="48"></label>
-        <label><input type="checkbox" id="chkMagnifier"> Magnifier</label>
-        <label>Gate height <input type="range" id="gateH" min="40" max="180" value="80"></label>
-        <label>Min area <input type="range" id="minArea" min="60" max="800" value="160"></label>
-        <label>Max area <input type="range" id="maxArea" min="300" max="4000" value="1600"></label>
+        <label>Offset px <input type="range" id="offsetPx" min="20" max="120" value="48"></label>
+        <label>Gate height <input type="range" id="gateH" min="40" max="200" value="90"></label>
+        <label>Min area <input type="range" id="minArea" min="40" max="800" value="140"></label>
+        <label>Max area <input type="range" id="maxArea" min="300" max="4000" value="1800"></label>
+        <label>Net sensitivity <input type="range" id="netThresh" min="40" max="1200" value="240"></label>
         <button id="btnDetect">Start detection</button>
         <button id="btnStop" class="danger">Stop</button>
       </div>
@@ -68,123 +64,71 @@
   </div>
 
 <script>
-const els={video:$('#video'), overlay:$('#overlay'), btnStart:$('#btnStart'), btnCalib:$('#btnCalib'), btnEdit:$('#btnEdit'), btnDetect:$('#btnDetect'), btnStop:$('#btnStop'), toast:$('#toast'), crosshair:$('#crosshair'), magnifier:$('#magnifier'), magCanvas:$('#magCanvas'), gateH:$('#gateH'), minArea:$('#minArea'), maxArea:$('#maxArea'), chkOffset:$('#chkOffset'), offsetPx:$('#offsetPx'), chkMagn:$('#chkMagnifier')};
-function $(id){return document.getElementById(id.replace('#',''))}
+// Helpers
+const $=id=>document.getElementById(id);
+const els={video:$('#video'), overlay:$('#overlay'), crosshair:$('#crosshair'), btnStart:$('#btnStart'), btnCalib:$('#btnCalib'), btnEdit:$('#btnEdit'), btnDetect:$('#btnDetect'), btnStop:$('#btnStop'), gateH:$('#gateH'), minArea:$('#minArea'), maxArea:$('#maxArea'), netThresh:$('#netThresh'), chkOffset:$('#chkOffset'), offsetPx:$('#offsetPx'), toast:$('#toast')};
 const octx=els.overlay.getContext('2d');
-const magCtx=els.magCanvas.getContext('2d');
 let stream=null, anim=null, running=false, detecting=false, editing=false, calibrating=false;
 let rimLine=null; // {x1,y1,x2,y2}
-let lastCentroid=null, lastTime=performance.now();
-const history=[]; // for net / crossing checks
-
 const work=document.createElement('canvas');
 const wctx=work.getContext('2d',{willReadFrequently:true});
-const SCALE=0.45, DIFF_THRESH=28;
+const SCALE=0.45, DIFF_THRESH=26; // slightly looser diff
+let history=[];
 
-async function startCam(){
-  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
-    els.video.srcObject=stream; await els.video.play(); syncSize(); running=true; loop();
-  }catch(e){alert('Camera error: '+e.message)}
-}
-function stopAll(){detecting=false; running=false; calibrating=false; editing=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }}
-function syncSize(){ const vw=els.video.videoWidth||640, vh=els.video.videoHeight||480; els.overlay.width=vw; els.overlay.height=vh; work.width=Math.round(vw*SCALE); work.height=Math.round(vh*SCALE); }
+function showToast(){ els.toast.classList.add('show'); setTimeout(()=> els.toast.classList.remove('show'), 1000); }
+function speak(text){ try{ const u=new SpeechSynthesisUtterance(text); u.rate=1; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){} }
 
-function draw(){ octx.clearRect(0,0,els.overlay.width,els.overlay.height); if(rimLine){ drawLine(rimLine); drawGate(rimLine); if(editing){ drawHandles(rimLine); } } }
+async function startCam(){ try{ stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}, audio:false}); els.video.srcObject=stream; await els.video.play(); syncSize(); running=true; loop(); } catch(e){ alert('Camera error: '+e.message); } }
+function stopAll(){ detecting=false; running=false; editing=false; calibrating=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } }
+function syncSize(){ els.overlay.width = els.video.videoWidth||640; els.overlay.height=els.video.videoHeight||480; work.width=Math.round(els.overlay.width*SCALE); work.height=Math.round(els.overlay.height*SCALE); draw(); }
+window.addEventListener('resize', ()=> setTimeout(syncSize,150));
+
+function draw(){ octx.clearRect(0,0,els.overlay.width,els.overlay.height); if(rimLine){ drawLine(rimLine); drawGate(rimLine); if(editing) drawHandles(rimLine); } }
 function drawLine({x1,y1,x2,y2}){ octx.save(); octx.strokeStyle='#70e1ff'; octx.lineWidth=4; octx.setLineDash([8,6]); octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.stroke(); octx.restore(); }
 function drawHandles({x1,y1,x2,y2}){ drawHandle(x1,y1); drawHandle(x2,y2); }
 function drawHandle(x,y){ octx.save(); octx.fillStyle='#70e1ff'; octx.strokeStyle='#03111f'; octx.lineWidth=2; octx.beginPath(); octx.arc(x,y,12,0,Math.PI*2); octx.fill(); octx.stroke(); octx.restore(); }
+function yOnLine(x,{x1,y1,x2,y2}){ const dx=x2-x1; if(Math.abs(dx)<1e-4) return (y1+y2)/2; const m=(y2-y1)/dx; return y1 + (x-x1)*m; }
+function drawGate(line){ const gh=+els.gateH.value; const x1=line.x1,y1=line.y1,x2=line.x2,y2=line.y2; const y1b=y1+gh, y2b=y2+gh; octx.save(); octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2; octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.lineTo(x2,y2b); octx.lineTo(x1,y1b); octx.closePath(); octx.stroke(); octx.restore(); }
 
-function yOnLine(x,{x1,y1,x2,y2}){ const dx=x2-x1; if(Math.abs(dx)<1e-4){ return (y1+y2)/2; } const m=(y2-y1)/dx; return y1 + (x - x1)*m; }
-
-function drawGate(line){ // Gate ALWAYS extends downward in screen coords (+Y)
-  const gh=+els.gateH.value; const margin=4;
-  const x1=line.x1, y1=line.y1, x2=line.x2, y2=line.y2;
-  const y1b=y1+gh, y2b=y2+gh; // bottom edge = top edge shifted down by gh
-  octx.save(); octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2;
-  octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.lineTo(x2,y2b); octx.lineTo(x1,y1b); octx.closePath(); octx.stroke(); octx.restore();
-}
-
-function loop(){ if(!running) return; anim=requestAnimationFrame(loop); draw(); if(!detecting || !rimLine) return;
-  // process frame diff in downscale
+function loop(){ if(!running) return; anim=requestAnimationFrame(loop); draw(); if(!detecting || !rimLine) return; // processing
   wctx.drawImage(els.video,0,0,work.width,work.height); const curr=wctx.getImageData(0,0,work.width,work.height); if(!loop.prev){ loop.prev=curr; return; } const prev=loop.prev; const dc=curr.data, dp=prev.data; const w=work.width, h=work.height;
-
-  let movedGate=0, sumGX=0, sumGY=0, movedNet=0;
-  const gh=+els.gateH.value; const minA=+els.minArea.value, maxA=+els.maxArea.value;
-  for(let i=0;i<dc.length;i+=4){ const dr=dc[i]-dp[i], dg=dc[i+1]-dp[i+1], db=dc[i+2]-dp[i+2]; const diff=Math.abs(dr)+Math.abs(dg)+Math.abs(db); if(diff>DIFF_THRESH){ const idx=i/4; const x=idx%w; const y=(idx-x)/w;
-      // Map processing coords to overlay coords for line math
-      const sx = x * (els.overlay.width / w); const sy = y * (els.overlay.height / h);
-      const yTop = yOnLine(sx, rimLine); const yBot = yTop + gh; // gate under rim
-      if(sy>=yTop && sy<=yBot && sx>=Math.min(rimLine.x1,rimLine.x2)-6 && sx<=Math.max(rimLine.x1,rimLine.x2)+6){
-        movedGate++; sumGX += x; sumGY += y;
-      } else if(sy>yBot && sy<=yBot+gh*0.7 && sx>=Math.min(rimLine.x1,rimLine.x2)-6 && sx<=Math.max(rimLine.x1,rimLine.x2)+6){
-        movedNet++;
-      }
-    }}
+  let movedGate=0,sumGX=0,sumGY=0, movedNet=0;
+  const gh=+els.gateH.value, minA=+els.minArea.value, maxA=+els.maxArea.value;
+  for(let i=0;i<dc.length;i+=4){ const dr=dc[i]-dp[i], dg=dc[i+1]-dp[i+1], db=dc[i+2]-dp[i+2]; const diff=Math.abs(dr)+Math.abs(dg)+Math.abs(db); if(diff>DIFF_THRESH){ const idx=i/4; const x=idx%w; const y=(idx-x)/w; const sx=x*(els.overlay.width/w), sy=y*(els.overlay.height/h); const yTop=yOnLine(sx,rimLine), yBot=yTop+gh; const insideX = sx>=Math.min(rimLine.x1,rimLine.x2)-8 && sx<=Math.max(rimLine.x1,rimLine.x2)+8; if(insideX && sy>=yTop && sy<=yBot){ movedGate++; sumGX+=x; sumGY+=y; } else if(insideX && sy>yBot && sy<=yBot+gh*0.7){ movedNet++; } } }
   loop.prev=curr;
-
-  // Candidate ball centroid inside gate
-  if(movedGate>=minA && movedGate<=maxA){
-    const scaleX = els.overlay.width / w, scaleY = els.overlay.height / h;
-    const cx = (sumGX / movedGate) * scaleX; const cy = (sumGY / movedGate) * scaleY;
-    // draw centroid
-    octx.save(); octx.fillStyle= '#45f0a0'; octx.beginPath(); octx.arc(cx,cy,8,0,Math.PI*2); octx.fill(); octx.restore();
-
-    const now = performance.now();
-    const yLine = yOnLine(cx, rimLine);
-    const above = cy < yLine;
-    history.push({t:now, cx, cy, yLine, above, movedNet});
-    while(history.length && now - history[0].t > 900) history.shift();
-
-    // Detect downward crossing: was above, then below, with decent downward delta
-    const wasAbove = history.some(h=>h.above);
-    const isBelowNow = !above;
-    const first = history[0]; const recent = history[history.length-1];
-    const downward = (recent && first) ? (recent.cy - first.cy) > 20 : false;
-
-    // Net swish confirmation in last 300ms
-    const netSum = history.filter(h=> now - h.t < 300).reduce((a,b)=>a+b.movedNet,0);
-    const netOK = netSum > Math.max(140, gh * 1.8);
-
-    if(wasAbove && isBelowNow && downward && netOK){
-      if(!loop.lastFire || now - loop.lastFire > 1100){ loop.lastFire = now; showToast(); speak('Nice shot'); history.length = 0; }
-    }
+  if(movedGate>=minA && movedGate<=maxA){ const scaleX=els.overlay.width/w, scaleY=els.overlay.height/h; const cx=(sumGX/movedGate)*scaleX, cy=(sumGY/movedGate)*scaleY; // draw centroid
+    octx.save(); octx.fillStyle='#45f0a0'; octx.beginPath(); octx.arc(cx,cy,8,0,Math.PI*2); octx.fill(); octx.restore();
+    const now=performance.now(); const yLine=yOnLine(cx,rimLine); const above=cy<yLine; history.push({t:now,cx,cy,above,net:movedNet}); while(history.length && now-history[0].t>900) history.shift();
+    const wasAbove = history.some(h=>h.above); const isBelow = !above; const first=history[0], last=history[history.length-1]; const downward = (last && first) ? (last.cy-first.cy)>18 : false; const netSum = history.filter(h=> now-h.t<260).reduce((a,b)=>a+b.net,0); const netOK = netSum > +els.netThresh.value; if(wasAbove && isBelow && downward && netOK){ if(!loop.lastFire || now-loop.lastFire>1100){ loop.lastFire=now; showToast(); speak('Nice shot'); history.length=0; } }
   }
 }
 
-// ---- Calibration & Editing ----
-function startCalibration(){ calibrating=true; editing=false; let taps=[]; function onTap(ev){ ev.preventDefault(); const {x,y}=pointerToCanvas(ev,true); taps.push({x,y}); showCrosshair(x,y); if(els.chkMagn.checked) showMagnifier(ev,x,y); if(taps.length===2){ finish(); } }
-  els.overlay.addEventListener('touchstart', onTap, {passive:false}); els.overlay.addEventListener('click', onTap, {passive:false});
-  function finish(){ els.overlay.removeEventListener('touchstart', onTap); els.overlay.removeEventListener('click', onTap); hideCrosshair(); hideMagnifier(); rimLine={x1:taps[0].x,y1:taps[0].y,x2:taps[1].x,y2:taps[1].y}; calibrating=false; editing=true; draw(); }
+// ---- Calibration & Editing with POINTER events and finger offset ----
+function startCalibration(){ calibrating=true; editing=false; let points=[]; const onDown=(ev)=>{ ev.preventDefault(); els.overlay.setPointerCapture(ev.pointerId); updateCrosshair(ev); };
+  const onMove=(ev)=>{ if(!calibrating) return; updateCrosshair(ev); };
+  const onUp=(ev)=>{ if(!calibrating) return; const p = clientToCanvasWithOffset(ev); points.push(p); hideCrosshair(); if(points.length===2){ finish(points); } };
+  els.overlay.addEventListener('pointerdown', onDown, {passive:false}); els.overlay.addEventListener('pointermove', onMove, {passive:false}); els.overlay.addEventListener('pointerup', onUp, {passive:false, once:false});
+  function finish(pts){ els.overlay.removeEventListener('pointerdown', onDown); els.overlay.removeEventListener('pointermove', onMove); els.overlay.removeEventListener('pointerup', onUp); rimLine={x1:pts[0].x,y1:pts[0].y,x2:pts[1].x,y2:pts[1].y}; calibrating=false; editing=true; draw(); }
 }
 
-function startEdit(){ if(!rimLine){ alert('Calibrate first.'); return; } editing = !editing; draw(); }
+function startEdit(){ if(!rimLine){ alert('Calibrate first.'); return; } editing=!editing; draw(); }
 
-function pointerToCanvas(ev, useOffset){ const rect = els.overlay.getBoundingClientRect(); const touch = ev.touches? ev.touches[0] : ev.changedTouches? ev.changedTouches[0] : ev; const offY = (useOffset && els.chkOffset.checked) ? (+els.offsetPx.value) : 0; const clientX = touch.clientX; const clientY = touch.clientY - offY; const x = (clientX - rect.left) * (els.overlay.width / rect.width); const y = (clientY - rect.top) * (els.overlay.height / rect.height); return {x,y, clientX, clientY}; }
-
-// Crosshair & magnifier (optional)
-function showCrosshair(x,y){ els.crosshair.style.display='block'; els.crosshair.style.left = x+'px'; els.crosshair.style.top = y+'px'; }
+function clientToCanvasWithOffset(ev){ const rect=els.overlay.getBoundingClientRect(); const off = els.chkOffset.checked ? +els.offsetPx.value : 0; const x=(ev.clientX-rect.left)*(els.overlay.width/rect.width); const y=((ev.clientY-off)-rect.top)*(els.overlay.height/rect.height); return {x,y}; }
+function updateCrosshair(ev){ const rect=els.overlay.getBoundingClientRect(); const off = els.chkOffset.checked ? +els.offsetPx.value : 0; const x=(ev.clientX-rect.left)*(els.overlay.width/rect.width); const y=((ev.clientY-off)-rect.top)*(els.overlay.height/rect.height); els.crosshair.style.left = x+'px'; els.crosshair.style.top = y+'px'; els.crosshair.style.display='block'; }
 function hideCrosshair(){ els.crosshair.style.display='none'; }
-function showMagnifier(ev,x,y){ const rect = els.overlay.getBoundingClientRect(); const zoom = 2.0; const size = 120; const sx = Math.max(0, Math.min(els.video.videoWidth - size/zoom, x - size/(2*zoom))); const sy = Math.max(0, Math.min(els.video.videoHeight - size/zoom, y - size/(2*zoom))); magCtx.imageSmoothingEnabled = false; magCtx.clearRect(0,0,size,size); magCtx.drawImage(els.video, sx, sy, size/zoom, size/zoom, 0, 0, size, size); els.magnifier.style.left = (ev.touches? ev.touches[0].clientX : ev.clientX) - size/2 + 'px'; els.magnifier.style.top = (ev.touches? ev.touches[0].clientY : ev.clientY) - size - 12 + 'px'; els.magnifier.style.display='block'; }
-function hideMagnifier(){ els.magnifier.style.display='none'; }
 
-// Drag editing with finger offset
-let dragging=null; // 'p1' | 'p2'
-els.overlay.addEventListener('touchstart', onDown, {passive:false}); els.overlay.addEventListener('mousedown', onDown);
-function onDown(ev){ if(!editing || !rimLine) return; ev.preventDefault(); const {x,y}=pointerToCanvas(ev,true); const d1=Math.hypot(x-rimLine.x1,y-rimLine.y1), d2=Math.hypot(x-rimLine.x2,y-rimLine.y2); const hs=18; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } }
-window.addEventListener('touchmove', onMove, {passive:false}); window.addEventListener('mousemove', onMove);
-function onMove(ev){ if(!dragging) return; ev.preventDefault(); const {x,y}=pointerToCanvas(ev,true); if(dragging==='p1'){ rimLine.x1=x; rimLine.y1=y; } else { rimLine.x2=x; rimLine.y2=y; } draw(); }
-window.addEventListener('touchend', ()=> dragging=null); window.addEventListener('mouseup', ()=> dragging=null);
+// Drag editing
+let dragging=null; // 'p1'|'p2'
+els.overlay.addEventListener('pointerdown', (ev)=>{ if(!editing || !rimLine) return; const p=clientToCanvasWithOffset(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=18; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } });
+els.overlay.addEventListener('pointermove', (ev)=>{ if(!dragging) return; const p=clientToCanvasWithOffset(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); });
+window.addEventListener('pointerup', ()=> dragging=null);
 
-function showToast(){ els.toast.classList.add('show'); setTimeout(()=> els.toast.classList.remove('show'), 1100); }
-function speak(text){ try{ const u=new SpeechSynthesisUtterance(text); u.rate=1; u.pitch=1; speechSynthesis.cancel(); speechSynthesis.speak(u); }catch(e){} }
-
-// Wire up
+// UI wiring
 els.btnStart.addEventListener('click', startCam);
 els.btnStop.addEventListener('click', stopAll);
 els.btnCalib.addEventListener('click', startCalibration);
 els.btnEdit.addEventListener('click', startEdit);
 els.btnDetect.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } detecting=true; editing=false; });
-window.addEventListener('resize', ()=> setTimeout(syncSize, 150));
 </script>
 </body>
 </html>
