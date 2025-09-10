@@ -32,6 +32,9 @@
     .crosshair:before, .crosshair:after{content:""; position:absolute; background:#fff}
     .crosshair:before{left:9px; top:0; bottom:0; width:2px}
     .crosshair:after{top:9px; left:0; right:0; height:2px}
+
+    .status{position:fixed; bottom:10px; left:10px; right:10px; background:#10161f; border:1px solid rgba(255,255,255,.12); padding:8px 12px; border-radius:10px; color:var(--muted); font-size:12px; display:none; z-index:30}
+    .status.show{display:block}
   </style>
 </head>
 <body>
@@ -61,28 +64,65 @@
     </section>
 
     <div class="toast" id="toast">Nice shot! 🏀</div>
+    <div class="status" id="status"></div>
   </div>
 
 <script>
-// Helpers
-const $=id=>document.getElementById(id);
-const els={video:$('#video'), overlay:$('#overlay'), crosshair:$('#crosshair'), btnStart:$('#btnStart'), btnCalib:$('#btnCalib'), btnEdit:$('#btnEdit'), btnDetect:$('#btnDetect'), btnStop:$('#btnStop'), gateH:$('#gateH'), minArea:$('#minArea'), maxArea:$('#maxArea'), netThresh:$('#netThresh'), chkOffset:$('#chkOffset'), offsetPx:$('#offsetPx'), toast:$('#toast')};
-const octx=els.overlay.getContext('2d');
+// ==== ELEMENTS (fix: no '#') ====
+const els = {
+  video: document.getElementById('video'),
+  overlay: document.getElementById('overlay'),
+  crosshair: document.getElementById('crosshair'),
+  btnStart: document.getElementById('btnStart'),
+  btnCalib: document.getElementById('btnCalib'),
+  btnEdit: document.getElementById('btnEdit'),
+  btnDetect: document.getElementById('btnDetect'),
+  btnStop: document.getElementById('btnStop'),
+  gateH: document.getElementById('gateH'),
+  minArea: document.getElementById('minArea'),
+  maxArea: document.getElementById('maxArea'),
+  netThresh: document.getElementById('netThresh'),
+  chkOffset: document.getElementById('chkOffset'),
+  offsetPx: document.getElementById('offsetPx'),
+  toast: document.getElementById('toast'),
+  status: document.getElementById('status'),
+};
+
+const octx = els.overlay.getContext('2d');
 let stream=null, anim=null, running=false, detecting=false, editing=false, calibrating=false;
 let rimLine=null; // {x1,y1,x2,y2}
-const work=document.createElement('canvas');
-const wctx=work.getContext('2d',{willReadFrequently:true});
+const work = document.createElement('canvas');
+const wctx = work.getContext('2d',{willReadFrequently:true});
 const SCALE=0.45, DIFF_THRESH=26; // slightly looser diff
 let history=[];
+
+// ==== STATUS / ERROR HELP ====
+function setStatus(msg){ els.status.textContent = msg; els.status.classList.add('show'); clearTimeout(setStatus._t); setStatus._t = setTimeout(()=> els.status.classList.remove('show'), 4000); }
+window.addEventListener('error', e=>{ setStatus('Script error: '+e.message); });
 
 function showToast(){ els.toast.classList.add('show'); setTimeout(()=> els.toast.classList.remove('show'), 1000); }
 function speak(text){ try{ const u=new SpeechSynthesisUtterance(text); u.rate=1; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){} }
 
-async function startCam(){ try{ stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}, audio:false}); els.video.srcObject=stream; await els.video.play(); syncSize(); running=true; loop(); } catch(e){ alert('Camera error: '+e.message); } }
-function stopAll(){ detecting=false; running=false; editing=false; calibrating=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } }
+// ==== CAMERA ====
+async function startCam(){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ setStatus('Camera API not available in this browser.'); return; }
+  try{
+    const constraints = { video:{ facingMode:{ideal:'environment'}}, audio:false };
+    setStatus('Requesting camera…');
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    els.video.srcObject = stream;
+    await els.video.play();
+    syncSize();
+    running = true; detecting=false; editing=false; calibrating=false;
+    setStatus('Camera started');
+    loop();
+  }catch(e){ setStatus('Camera error: '+e.message); }
+}
+function stopAll(){ detecting=false; running=false; editing=false; calibrating=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } setStatus('Stopped'); }
 function syncSize(){ els.overlay.width = els.video.videoWidth||640; els.overlay.height=els.video.videoHeight||480; work.width=Math.round(els.overlay.width*SCALE); work.height=Math.round(els.overlay.height*SCALE); draw(); }
 window.addEventListener('resize', ()=> setTimeout(syncSize,150));
 
+// ==== DRAWING ====
 function draw(){ octx.clearRect(0,0,els.overlay.width,els.overlay.height); if(rimLine){ drawLine(rimLine); drawGate(rimLine); if(editing) drawHandles(rimLine); } }
 function drawLine({x1,y1,x2,y2}){ octx.save(); octx.strokeStyle='#70e1ff'; octx.lineWidth=4; octx.setLineDash([8,6]); octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.stroke(); octx.restore(); }
 function drawHandles({x1,y1,x2,y2}){ drawHandle(x1,y1); drawHandle(x2,y2); }
@@ -90,6 +130,7 @@ function drawHandle(x,y){ octx.save(); octx.fillStyle='#70e1ff'; octx.strokeStyl
 function yOnLine(x,{x1,y1,x2,y2}){ const dx=x2-x1; if(Math.abs(dx)<1e-4) return (y1+y2)/2; const m=(y2-y1)/dx; return y1 + (x-x1)*m; }
 function drawGate(line){ const gh=+els.gateH.value; const x1=line.x1,y1=line.y1,x2=line.x2,y2=line.y2; const y1b=y1+gh, y2b=y2+gh; octx.save(); octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2; octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.lineTo(x2,y2b); octx.lineTo(x1,y1b); octx.closePath(); octx.stroke(); octx.restore(); }
 
+// ==== MAIN LOOP ====
 function loop(){ if(!running) return; anim=requestAnimationFrame(loop); draw(); if(!detecting || !rimLine) return; // processing
   wctx.drawImage(els.video,0,0,work.width,work.height); const curr=wctx.getImageData(0,0,work.width,work.height); if(!loop.prev){ loop.prev=curr; return; } const prev=loop.prev; const dc=curr.data, dp=prev.data; const w=work.width, h=work.height;
   let movedGate=0,sumGX=0,sumGY=0, movedNet=0;
@@ -103,32 +144,36 @@ function loop(){ if(!running) return; anim=requestAnimationFrame(loop); draw(); 
   }
 }
 
-// ---- Calibration & Editing with POINTER events and finger offset ----
-function startCalibration(){ calibrating=true; editing=false; let points=[]; const onDown=(ev)=>{ ev.preventDefault(); els.overlay.setPointerCapture(ev.pointerId); updateCrosshair(ev); };
+// ==== CALIBRATION & EDITING (touch-friendly with offset) ====
+function startCalibration(){ calibrating=true; editing=false; let points=[]; const onDown=(ev)=>{ ev.preventDefault(); updateCrosshair(ev); };
   const onMove=(ev)=>{ if(!calibrating) return; updateCrosshair(ev); };
   const onUp=(ev)=>{ if(!calibrating) return; const p = clientToCanvasWithOffset(ev); points.push(p); hideCrosshair(); if(points.length===2){ finish(points); } };
-  els.overlay.addEventListener('pointerdown', onDown, {passive:false}); els.overlay.addEventListener('pointermove', onMove, {passive:false}); els.overlay.addEventListener('pointerup', onUp, {passive:false, once:false});
-  function finish(pts){ els.overlay.removeEventListener('pointerdown', onDown); els.overlay.removeEventListener('pointermove', onMove); els.overlay.removeEventListener('pointerup', onUp); rimLine={x1:pts[0].x,y1:pts[0].y,x2:pts[1].x,y2:pts[1].y}; calibrating=false; editing=true; draw(); }
+  els.overlay.addEventListener('touchstart', onDown, {passive:false}); els.overlay.addEventListener('mousemove', onMove, {passive:false}); els.overlay.addEventListener('touchmove', onMove, {passive:false}); els.overlay.addEventListener('mouseup', onUp, {passive:false}); els.overlay.addEventListener('touchend', onUp, {passive:false});
+  function finish(pts){ cleanup(); rimLine={x1:pts[0].x,y1:pts[0].y,x2:pts[1].x,y2:pts[1].y}; calibrating=false; editing=true; draw(); }
+  function cleanup(){ els.overlay.removeEventListener('touchstart', onDown); els.overlay.removeEventListener('mousemove', onMove); els.overlay.removeEventListener('touchmove', onMove); els.overlay.removeEventListener('mouseup', onUp); els.overlay.removeEventListener('touchend', onUp); }
 }
 
 function startEdit(){ if(!rimLine){ alert('Calibrate first.'); return; } editing=!editing; draw(); }
 
-function clientToCanvasWithOffset(ev){ const rect=els.overlay.getBoundingClientRect(); const off = els.chkOffset.checked ? +els.offsetPx.value : 0; const x=(ev.clientX-rect.left)*(els.overlay.width/rect.width); const y=((ev.clientY-off)-rect.top)*(els.overlay.height/rect.height); return {x,y}; }
-function updateCrosshair(ev){ const rect=els.overlay.getBoundingClientRect(); const off = els.chkOffset.checked ? +els.offsetPx.value : 0; const x=(ev.clientX-rect.left)*(els.overlay.width/rect.width); const y=((ev.clientY-off)-rect.top)*(els.overlay.height/rect.height); els.crosshair.style.left = x+'px'; els.crosshair.style.top = y+'px'; els.crosshair.style.display='block'; }
+function clientToCanvasWithOffset(ev){ const rect=els.overlay.getBoundingClientRect(); const off = els.chkOffset.checked ? +els.offsetPx.value : 0; const clientX = ev.clientX ?? (ev.touches && ev.touches[0].clientX) ?? (ev.changedTouches && ev.changedTouches[0].clientX); const clientY = ev.clientY ?? (ev.touches && ev.touches[0].clientY) ?? (ev.changedTouches && ev.changedTouches[0].clientY); const x=(clientX-rect.left)*(els.overlay.width/rect.width); const y=((clientY-off)-rect.top)*(els.overlay.height/rect.height); return {x,y}; }
+function updateCrosshair(ev){ const rect=els.overlay.getBoundingClientRect(); const off = els.chkOffset.checked ? +els.offsetPx.value : 0; const clientX = ev.clientX ?? (ev.touches && ev.touches[0].clientX) ?? (ev.changedTouches && ev.changedTouches[0].clientX); const clientY = ev.clientY ?? (ev.touches && ev.touches[0].clientY) ?? (ev.changedTouches && ev.changedTouches[0].clientY); const x=(clientX-rect.left)*(els.overlay.width/rect.width); const y=((clientY-off)-rect.top)*(els.overlay.height/rect.height); els.crosshair.style.left = x+'px'; els.crosshair.style.top = y+'px'; els.crosshair.style.display='block'; }
 function hideCrosshair(){ els.crosshair.style.display='none'; }
 
 // Drag editing
 let dragging=null; // 'p1'|'p2'
-els.overlay.addEventListener('pointerdown', (ev)=>{ if(!editing || !rimLine) return; const p=clientToCanvasWithOffset(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=18; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } });
-els.overlay.addEventListener('pointermove', (ev)=>{ if(!dragging) return; const p=clientToCanvasWithOffset(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); });
-window.addEventListener('pointerup', ()=> dragging=null);
+els.overlay.addEventListener('mousedown', (ev)=>{ if(!editing || !rimLine) return; const p=clientToCanvasWithOffset(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=18; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } });
+els.overlay.addEventListener('mousemove', (ev)=>{ if(!dragging) return; const p=clientToCanvasWithOffset(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); });
+window.addEventListener('mouseup', ()=> dragging=null);
+els.overlay.addEventListener('touchstart', (ev)=>{ if(!editing || !rimLine) return; const p=clientToCanvasWithOffset(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=24; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } });
+els.overlay.addEventListener('touchmove', (ev)=>{ if(!dragging) return; const p=clientToCanvasWithOffset(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); }, {passive:false});
+window.addEventListener('touchend', ()=> dragging=null);
 
-// UI wiring
+// ==== UI wiring (explicit) ====
 els.btnStart.addEventListener('click', startCam);
 els.btnStop.addEventListener('click', stopAll);
 els.btnCalib.addEventListener('click', startCalibration);
 els.btnEdit.addEventListener('click', startEdit);
-els.btnDetect.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } detecting=true; editing=false; });
+els.btnDetect.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } detecting=true; editing=false; setStatus('Detecting…'); });
 </script>
 </body>
 </html>
