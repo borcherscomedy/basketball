@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-  <title>Mini Hoop Shot Detector — ROI Motion (No Color)</title>
+  <title>Mini Hoop Shot Detector — ROI Motion + Blob Tracking</title>
   <style>
     :root{ --bg:#0b0e13; --ink:#e8eefc; --muted:#9fb0d5; --accent:#70e1ff; --ok:#45f0a0 }
     body{margin:0;background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
@@ -31,8 +31,8 @@
 <body>
   <div class="wrap">
     <header class="card">
-      <h1>Mini Hoop Shot Detector — ROI Motion (No Color)</h1>
-      <span class="pill">Downward crossing • No net • iPhone-friendly</span>
+      <h1>Mini Hoop Shot Detector — ROI Motion + Blob Tracking</h1>
+      <span class="pill">Downward crossing • No color • No net</span>
     </header>
 
     <section class="video-area card">
@@ -50,6 +50,7 @@
           <button id="btnStop" class="danger">Stop</button>
           <span class="pill">Baskets: <strong id="count">0</strong></span>
           <label>Debug <input type="checkbox" id="dbg" checked></label>
+          <label>Show motion <input type="checkbox" id="showMotion" checked></label>
         </div>
         <div class="row">
           <label>Gate height <input type="range" id="gateH" min="80" max="240" value="130"></label>
@@ -73,7 +74,7 @@ const els = {
   video: $('#video'), overlay: $('#overlay'),
   btnStart: $('#btnStart'), btnCalib: $('#btnCalib'), btnEdit: $('#btnEdit'), btnDetect: $('#btnDetect'), btnStop: $('#btnStop'),
   gateH: $('#gateH'), motT: $('#motT'), minA: $('#minA'), maxA: $('#maxA'), minRR: $('#minRR'), maxRR: $('#maxRR'),
-  dbg: $('#dbg'), toast: $('#toast'), status: $('#status'), count: $('#count')
+  dbg: $('#dbg'), showMotion: $('#showMotion'), toast: $('#toast'), status: $('#status'), count: $('#count')
 };
 const octx = els.overlay.getContext('2d');
 
@@ -81,9 +82,9 @@ const octx = els.overlay.getContext('2d');
 let stream=null, anim=null, running=false, detecting=false, editing=false, calibrating=false;
 let rimLine=null; // {x1,y1,x2,y2}
 let lastFire=0;
-let history=[];
+let history=[]; // {t, cy, above}
 
-/* ---------- Helpers ---------- */
+/* ---------- Utils ---------- */
 function setStatus(msg){ els.status.textContent = msg; els.status.classList.add('show'); clearTimeout(setStatus._t); setStatus._t = setTimeout(()=> els.status.classList.remove('show'), 3500); }
 function showToast(){ els.toast.classList.add('show'); setTimeout(()=> els.toast.classList.remove('show'), 1000); }
 function speak(text){ try{ const u=new SpeechSynthesisUtterance(text); u.rate=1; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){} }
@@ -94,71 +95,35 @@ function draw(){ octx.clearRect(0,0,els.overlay.width,els.overlay.height); if(ri
 function drawLine({x1,y1,x2,y2}){ octx.save(); octx.strokeStyle='#70e1ff'; octx.lineWidth=4; octx.setLineDash([8,6]); octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.stroke(); octx.restore(); }
 function drawHandles({x1,y1,x2,y2}){ drawHandle(x1,y1); drawHandle(x2,y2); }
 function drawHandle(x,y){ octx.save(); octx.fillStyle='#70e1ff'; octx.strokeStyle='#03111f'; octx.lineWidth=2; octx.beginPath(); octx.arc(x,y,12,0,Math.PI*2); octx.fill(); octx.stroke(); octx.restore(); }
+function drawGate(line){ const gh=+els.gateH.value; const {x1,y1,x2,y2}=line; const yTop=(y1+y2)/2; const x = Math.min(x1,x2)-8, w = Math.abs(x2-x1)+16, y = yTop, h = gh; octx.save(); octx.fillStyle='rgba(112,225,255,0.12)'; octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2; octx.fillRect(x,y,w,h); octx.strokeRect(x,y,w,h); octx.restore(); }
 
-function drawGate(line){ // shaded rectangle under the rim (axis-aligned thickness)
-  const gh=+els.gateH.value; const {x1,y1,x2,y2}=line; const yTop=(y1+y2)/2; // average so the gate is clean
-  octx.save();
-  octx.fillStyle='rgba(112,225,255,0.12)';
-  octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2;
-  const x = Math.min(x1,x2)-8, w = Math.abs(x2-x1)+16, y = yTop, h = gh;
-  octx.fillRect(x,y,w,h); octx.strokeRect(x,y,w,h);
-  octx.restore();
-}
-
+/* ---------- Gate ROI ---------- */
 function gateROI(rim, gateH) {
   const pad = 8;
   const x = Math.min(rim.x1, rim.x2) - pad;
   const w = Math.abs(rim.x2 - rim.x1) + pad*2;
-  const yTop = (rim.y1 + rim.y2) / 2;  // average to avoid slope headaches
+  const yTop = (rim.y1 + rim.y2) / 2;
   const h = gateH;
-  return {
-    x: Math.max(0, Math.floor(x)),
-    y: Math.max(0, Math.floor(yTop)),
-    w: Math.max(1, Math.floor(w)),
-    h: Math.max(1, Math.floor(h)),
-  };
+  return { x: Math.max(0, Math.floor(x)), y: Math.max(0, Math.floor(yTop)), w: Math.max(1, Math.floor(w)), h: Math.max(1, Math.floor(h)) };
 }
 
 /* ---------- Background model in ROI ---------- */
 class ROIBackground {
   constructor() { this.w=0; this.h=0; this.buf=null; this.inited=false; }
   resize(w,h){ if(w!==this.w || h!==this.h){ this.w=w; this.h=h; this.buf=new Float32Array(w*h); this.buf.fill(0); this.inited=false; } }
-  update(Y, alpha=0.04){
-    const N=this.w*this.h;
-    if(!this.inited){ for(let i=0;i<N;i++) this.buf[i]=Y[i]; this.inited=true; return; }
-    for(let i=0;i<N;i++) this.buf[i] = (1-alpha)*this.buf[i] + alpha*Y[i];
-  }
+  update(Y, alpha=0.04){ const N=this.w*this.h; if(!this.inited){ for(let i=0;i<N;i++) this.buf[i]=Y[i]; this.inited=true; return; } for(let i=0;i<N;i++) this.buf[i] = (1-alpha)*this.buf[i] + alpha*Y[i]; }
 }
 let roiBG = new ROIBackground();
 
 /* ---------- Camera ---------- */
-async function startCam(){
-  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ setStatus('Camera API not available.'); return; }
-  try{
-    stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false });
-    els.video.srcObject = stream; await els.video.play();
-    syncSize(); running=true; setStatus('Camera started'); loop();
-  }catch(e){ setStatus('Camera error: '+e.message); }
-}
+async function startCam(){ if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ setStatus('Camera API not available.'); return; } try{ stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false }); els.video.srcObject = stream; await els.video.play(); syncSize(); running=true; setStatus('Camera started'); loop(); }catch(e){ setStatus('Camera error: '+e.message); } }
 function stopAll(){ detecting=false; running=false; editing=false; calibrating=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } setStatus('Stopped'); }
 function syncSize(){ els.overlay.width = els.video.videoWidth||640; els.overlay.height = els.video.videoHeight||480; draw(); }
 window.addEventListener('resize', ()=> setTimeout(syncSize,150));
 
 /* ---------- Calibration & Editing ---------- */
 function eventToCanvas(ev){ const rect=els.overlay.getBoundingClientRect(); const t=ev.touches?ev.touches[0]:ev; const x=(t.clientX-rect.left)*(els.overlay.width/rect.width); const y=(t.clientY-rect.top)*(els.overlay.height/rect.height); return {x,y}; }
-
-function startCalibration(){
-  calibrating=true; editing=false; setStatus('Tap LEFT rim edge, then RIGHT rim edge');
-  let pts=[];
-  const commit=(ev)=>{ ev.preventDefault(); const p=eventToCanvas(ev); pts.push(p);
-    // marker
-    octx.save(); octx.fillStyle='#ffd166'; octx.beginPath(); octx.arc(p.x,p.y,6,0,Math.PI*2); octx.fill(); octx.restore();
-    if(pts.length===2){ els.overlay.removeEventListener('touchstart', commit); els.overlay.removeEventListener('click', commit); rimLine={x1:pts[0].x,y1:pts[0].y,x2:pts[1].x,y2:pts[1].y}; calibrating=false; editing=true; draw(); setStatus('Rim set. Use Edit to fine tune.'); }
-  };
-  els.overlay.addEventListener('touchstart', commit, {passive:false});
-  els.overlay.addEventListener('click', commit, {passive:false});
-}
-
+function startCalibration(){ calibrating=true; editing=false; setStatus('Tap LEFT rim edge, then RIGHT rim edge'); let pts=[]; const commit=(ev)=>{ ev.preventDefault(); const p=eventToCanvas(ev); pts.push(p); octx.save(); octx.fillStyle='#ffd166'; octx.beginPath(); octx.arc(p.x,p.y,6,0,Math.PI*2); octx.fill(); octx.restore(); if(pts.length===2){ els.overlay.removeEventListener('touchstart', commit); els.overlay.removeEventListener('click', commit); rimLine={x1:pts[0].x,y1:pts[0].y,x2:pts[1].x,y2:pts[1].y}; calibrating=false; editing=true; draw(); setStatus('Rim set. Use Edit to fine tune.'); } }; els.overlay.addEventListener('touchstart', commit, {passive:false}); els.overlay.addEventListener('click', commit, {passive:false}); }
 let dragging=null; // 'p1'|'p2'
 els.overlay.addEventListener('touchstart', (ev)=>{ if(!editing||!rimLine) return; const p=eventToCanvas(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; dragging = d1<=hs ? 'p1' : (d2<=hs ? 'p2' : null); }, {passive:false});
 els.overlay.addEventListener('mousedown', (ev)=>{ if(!editing||!rimLine) return; const p=eventToCanvas(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; dragging = d1<=hs ? 'p1' : (d2<=hs ? 'p2' : null); });
@@ -167,7 +132,45 @@ els.overlay.addEventListener('mousemove', (ev)=>{ if(!dragging) return; const p=
 window.addEventListener('touchend', ()=> dragging=null);
 window.addEventListener('mouseup', ()=> dragging=null);
 
-/* ---------- Detection loop (ROI + adaptive background) ---------- */
+/* ---------- Connected Components ---------- */
+function labelBlobs(mask, w, h) {
+  const visited = new Uint8Array(w*h);
+  const blobs = [];
+  const stackX = new Int32Array(w*h);
+  const stackY = new Int32Array(w*h);
+  const idx = (x,y)=> y*w + x;
+  for (let y=0; y<h; y++) {
+    for (let x=0; x<w; x++) {
+      const i = idx(x,y);
+      if (!mask[i] || visited[i]) continue;
+      let top = 0;
+      stackX[top] = x; stackY[top] = y; top++;
+      visited[i] = 1;
+      let minX=x, maxX=x, minY=y, maxY=y;
+      let area = 0, sumX=0, sumY=0;
+      while (top>0) {
+        top--;
+        const cx = stackX[top], cy = stackY[top];
+        const ci = idx(cx,cy);
+        area++; sumX += cx; sumY += cy;
+        if (cx<minX) minX=cx; if (cx>maxX) maxX=cx;
+        if (cy<minY) minY=cy; if (cy>maxY) maxY=cy;
+        // 4-connected neighbors
+        if (cx>0)   { const ni=ci-1;      if (mask[ni] && !visited[ni]) { visited[ni]=1; stackX[top]=cx-1; stackY[top]=cy; top++; } }
+        if (cx<w-1) { const ni=ci+1;      if (mask[ni] && !visited[ni]) { visited[ni]=1; stackX[top]=cx+1; stackY[top]=cy; top++; } }
+        if (cy>0)   { const ni=ci-w;      if (mask[ni] && !visited[ni]) { visited[ni]=1; stackX[top]=cx;   stackY[top]=cy-1; top++; } }
+        if (cy<h-1) { const ni=ci+w;      if (mask[ni] && !visited[ni]) { visited[ni]=1; stackX[top]=cx;   stackY[top]=cy+1; top++; } }
+      }
+      const bboxW = maxX-minX+1, bboxH = maxY-minY+1;
+      const cx = sumX/area, cy = sumY/area;
+      const solidity = area / (bboxW * bboxH);
+      blobs.push({ area, minX, minY, maxX, maxY, bboxW, bboxH, cx, cy, solidity });
+    }
+  }
+  return blobs;
+}
+
+/* ---------- Detection loop (ROI + background + blob pick) ---------- */
 function loop(){
   if(!running) return;
   anim = requestAnimationFrame(loop);
@@ -177,7 +180,7 @@ function loop(){
   const gh = +els.gateH.value;
   const roi = gateROI(rimLine, gh);
 
-  // Prepare ROI canvas 1:1 (no scaling math)
+  // ROI canvas 1:1
   if(!loop.roiCanvas){
     loop.roiCanvas = document.createElement('canvas');
     loop.roiCtx = loop.roiCanvas.getContext('2d', { willReadFrequently: true });
@@ -199,22 +202,23 @@ function loop(){
 
   // 2) Update background
   roiBG.resize(roi.w, roi.h);
-  roiBG.update(Y, 0.04); // slow EMA so the moving ball stands out
+  roiBG.update(Y, 0.04);
 
-  // 3) Motion mask & features
-  const MOTION_T = +els.motT.value; // from slider
-  let area=0, minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity, sumX=0, sumY=0;
+  // 3) Motion mask
+  const MOTION_T = +els.motT.value;
+  const mask = new Uint8Array(N);
+  for (let y=0, k=0; y<roi.h; y++) {
+    for (let x=0; x<roi.w; x++, k++) {
+      const diff = Math.abs(Y[k] - roiBG.buf[k]);
+      if (diff > MOTION_T) mask[k] = 1;
+    }
+  }
 
-  for (let y=0, idx=0; y<roi.h; y++){
-    for (let x=0; x<roi.w; x++, idx++){
-      const diff = Math.abs(Y[idx] - roiBG.buf[idx]);
-      if (diff > MOTION_T){
-        area++;
-        sumX += x; sumY += y;
-        if (x<minX) minX=x; if (x>maxX) maxX=x;
-        if (y<minY) minY=y; if (y>maxY) maxY=y;
-        if (els.dbg.checked) {
-          // red motion pixels
+  // Optional: show raw motion pixels
+  if (els.dbg.checked && els.showMotion.checked) {
+    for (let y=0, k=0; y<roi.h; y++) {
+      for (let x=0; x<roi.w; x++, k++) {
+        if (mask[k]) {
           octx.fillStyle='rgba(255,80,80,0.85)';
           octx.fillRect(roi.x + x, roi.y + y, 1.2, 1.2);
         }
@@ -222,37 +226,37 @@ function loop(){
     }
   }
 
-  // 4) Size/shape filters (within ROI)
-  if (area === 0) return;
-  const bboxW = (isFinite(minX)&&isFinite(maxX)) ? (maxX-minX+1) : 0;
-  const bboxH = (isFinite(minY)&&isFinite(maxY)) ? (maxY-minY+1) : 0;
+  // 4) Connected components -> choose best blob
+  const blobs = labelBlobs(mask, roi.w, roi.h);
+  if (!blobs.length) return;
 
   const rimWidthPx = Math.hypot(rimLine.x2 - rimLine.x1, rimLine.y2 - rimLine.y1);
   const minRimRatio = (+els.minRR.value)/100, maxRimRatio = (+els.maxRR.value)/100;
-  const widthOK = bboxW >= rimWidthPx*minRimRatio && bboxW <= rimWidthPx*maxRimRatio;
+  const MIN_AREA = +els.minA.value, MAX_AREA = +els.maxA.value;
 
-  const aspect = bboxW / Math.max(1, bboxH);
-  const aspectOK = aspect > 0.55 && aspect < 1.75;       // ball-ish, not a skinny arm
+  let best=null, bestScore=-1;
+  for (const b of blobs) {
+    const { area, bboxW, bboxH, solidity } = b;
+    const aspect = bboxW / Math.max(1, bboxH);
+    const widthOK = bboxW >= rimWidthPx*minRimRatio && bboxW <= rimWidthPx*maxRimRatio;
+    const aspectOK = aspect > 0.6 && aspect < 1.6;
+    const solidityOK = solidity > 0.35 && solidity < 0.95;
+    const areaOK = area >= MIN_AREA && area <= MAX_AREA;
+    if (!(widthOK && aspectOK && solidityOK && areaOK)) continue;
+    const compact = 1 - Math.abs(solidity - 0.7); // prefer near-compact blobs
+    const score = area * compact;
+    if (score > bestScore) { bestScore = score; best = b; }
+  }
+  if (!best) return;
 
-  const solidity = area / Math.max(1, (bboxW * bboxH));  // rough compactness
-  const solidityOK = solidity > 0.30 && solidity < 0.95;
-
-  const MIN_AREA = +els.minA.value;
-  const MAX_AREA = +els.maxA.value;
-  const areaOK = area >= MIN_AREA && area <= MAX_AREA;
-
-  if (!(widthOK && aspectOK && solidityOK && areaOK)) return;
-
-  // 5) Centroid (overlay coords)
-  const cx = roi.x + (sumX / area);
-  const cy = roi.y + (sumY / area);
-
+  // 5) Chosen blob visuals
+  const cx = roi.x + best.cx;
+  const cy = roi.y + best.cy;
   if (els.dbg.checked) {
-    // ROI, bbox, centroid
     octx.save();
     octx.strokeStyle='rgba(0,255,0,0.6)'; octx.strokeRect(roi.x, roi.y, roi.w, roi.h);
-    octx.strokeStyle='rgba(80,200,255,0.9)'; octx.strokeRect(roi.x+minX, roi.y+minY, bboxW, bboxH);
-    octx.fillStyle=varOk('#45f0a0','#45f0a0'); octx.beginPath(); octx.arc(cx,cy,6,0,Math.PI*2); octx.fill();
+    octx.strokeStyle='rgba(80,200,255,0.9)'; octx.strokeRect(roi.x+best.minX, roi.y+best.minY, best.bboxW, best.bboxH);
+    octx.fillStyle='#45f0a0'; octx.beginPath(); octx.arc(cx,cy,6,0,Math.PI*2); octx.fill();
     octx.restore();
   }
 
@@ -274,7 +278,6 @@ function loop(){
     showToast(); speak('Nice shot'); history.length = 0;
   }
 }
-function varOk(v){ return v; } // tiny helper to keep minifiers calm
 
 /* ---------- UI wiring ---------- */
 els.btnStart.addEventListener('click', startCam);
