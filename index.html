@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-  <title>Mini Hoop Shot Detector — Stable Mode</title>
+  <title>Mini Hoop Shot Detector — Debug Overlay</title>
   <style>
     :root{ --bg:#0b0e13; --ink:#e8eefc; --muted:#9fb0d5; --accent:#70e1ff; --ok:#45f0a0; --warn:#ffd166; --err:#ff6b6b }
     body{margin:0; background:var(--bg); color:var(--ink); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial}
@@ -30,15 +30,12 @@
     .status{position:fixed; bottom:10px; left:10px; right:10px; background:#10161f; border:1px solid rgba(255,255,255,.12); padding:8px 12px; border-radius:10px; color:var(--muted); font-size:12px; display:none; z-index:30}
     .status.show{display:block}
 
-    .nudge{display:inline-grid; grid-template-columns:40px 40px 40px; grid-template-rows:40px 40px 40px; gap:4px}
-    .nudge button{width:40px; height:40px; font-size:16px; border-radius:8px}
-    .nudge .empty{opacity:0}
     .pill{background:#0f1624; border:1px solid rgba(255,255,255,.12); padding:6px 10px; border-radius:999px}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <header class="card"><h1>Mini Hoop Shot Detector — Stable Mode</h1><span class="pill">No color filter • iPhone‑friendly</span></header>
+    <header class="card"><h1>Mini Hoop Shot Detector — Debug Overlay</h1><span class="pill">Green‑ball friendly • Net check optional</span></header>
 
     <section class="video-area card" id="videoArea">
       <video id="video" playsinline muted></video>
@@ -56,26 +53,15 @@
           <span class="pill">Baskets: <strong id="count">0</strong></span>
         </div>
         <div class="row">
-          <label>Gate height <input type="range" id="gateH" min="60" max="220" value="110"></label>
-          <label>Min area <input type="range" id="minArea" min="40" max="800" value="120"></label>
-          <label>Max area <input type="range" id="maxArea" min="300" max="4000" value="2400"></label>
+          <label>Gate height <input type="range" id="gateH" min="60" max="240" value="120"></label>
+          <label>Min area <input type="range" id="minArea" min="40" max="1200" value="120"></label>
+          <label>Max area <input type="range" id="maxArea" min="200" max="6000" value="3200"></label>
+          <label>Use net confirmation <input type="checkbox" id="useNet" checked></label>
           <label>Net sensitivity <input type="range" id="netThresh" min="40" max="1200" value="220"></label>
-          <span class="pill">Preset: 
-            <button id="presetLoose">Loose</button>
-            <button id="presetBalanced">Balanced</button>
-            <button id="presetStrict">Strict</button>
-          </span>
+          <label>Debug overlay <input type="checkbox" id="dbg" checked></label>
         </div>
         <div class="row">
-          <span class="pill">Adjust endpoints (precise)</span>
-          <label><input type="radio" name="which" id="p1" checked> P1</label>
-          <label><input type="radio" name="which" id="p2"> P2</label>
-          <label>Step <input type="range" id="step" min="1" max="8" value="2"></label>
-          <div class="nudge">
-            <span class="empty"></span><button id="nUp">↑</button><span class="empty"></span>
-            <button id="nLeft">←</button><span class="empty"></span><button id="nRight">→</button>
-            <span class="empty"></span><button id="nDown">↓</button><span class="empty"></span>
-          </div>
+          <span class="pill">Rim‑normalized width filter: 0.33× ≤ object ≤ 0.95× rim</span>
         </div>
       </div>
     </section>
@@ -86,19 +72,13 @@
 
 <script>
 // ==== ELEMENTS ====
-const els = {
-  video: document.getElementById('video'), overlay: document.getElementById('overlay'),
-  btnStart: document.getElementById('btnStart'), btnCalib: document.getElementById('btnCalib'), btnEdit: document.getElementById('btnEdit'), btnDetect: document.getElementById('btnDetect'), btnStop: document.getElementById('btnStop'),
-  gateH: document.getElementById('gateH'), minArea: document.getElementById('minArea'), maxArea: document.getElementById('maxArea'), netThresh: document.getElementById('netThresh'),
-  presetLoose: document.getElementById('presetLoose'), presetBalanced: document.getElementById('presetBalanced'), presetStrict: document.getElementById('presetStrict'),
-  p1: document.getElementById('p1'), p2: document.getElementById('p2'), step: document.getElementById('step'), nUp: document.getElementById('nUp'), nDown: document.getElementById('nDown'), nLeft: document.getElementById('nLeft'), nRight: document.getElementById('nRight'),
-  toast: document.getElementById('toast'), status: document.getElementById('status'), count: document.getElementById('count')
-};
+const els = { video: q('#video'), overlay: q('#overlay'), btnStart: q('#btnStart'), btnCalib: q('#btnCalib'), btnEdit: q('#btnEdit'), btnDetect: q('#btnDetect'), btnStop: q('#btnStop'), gateH: q('#gateH'), minArea: q('#minArea'), maxArea: q('#maxArea'), netThresh: q('#netThresh'), useNet: q('#useNet'), dbg: q('#dbg'), toast: q('#toast'), status: q('#status'), count: q('#count') };
+function q(s){ return document.querySelector(s); }
 const octx = els.overlay.getContext('2d');
 
 let stream=null, anim=null, running=false, detecting=false, editing=false, calibrating=false;
 let rimLine=null; // {x1,y1,x2,y2}
-let DIFF_THRESH = 26; // mutable now
+let DIFF_THRESH = 26; // frame diff threshold
 const work = document.createElement('canvas');
 const wctx = work.getContext('2d',{willReadFrequently:true});
 let history=[];
@@ -119,36 +99,71 @@ function stopAll(){ detecting=false; running=false; editing=false; calibrating=f
 function syncSize(){ els.overlay.width = els.video.videoWidth||640; els.overlay.height=els.video.videoHeight||480; work.width=Math.round(els.overlay.width*0.45); work.height=Math.round(els.overlay.height*0.45); draw(); }
 window.addEventListener('resize', ()=> setTimeout(syncSize,150));
 
-// ==== DRAWING ====
+// ==== DRAWING / DEBUG ====
 function draw(){ octx.clearRect(0,0,els.overlay.width,els.overlay.height); if(rimLine){ drawLine(rimLine); drawGate(rimLine); if(editing) drawHandles(rimLine); } }
 function drawLine({x1,y1,x2,y2}){ octx.save(); octx.strokeStyle='#70e1ff'; octx.lineWidth=4; octx.setLineDash([8,6]); octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.stroke(); octx.restore(); }
 function drawHandles({x1,y1,x2,y2}){ drawHandle(x1,y1); drawHandle(x2,y2); }
 function drawHandle(x,y){ octx.save(); octx.fillStyle='#70e1ff'; octx.strokeStyle='#03111f'; octx.lineWidth=2; octx.beginPath(); octx.arc(x,y,12,0,Math.PI*2); octx.fill(); octx.stroke(); octx.restore(); }
 function yOnLine(x,{x1,y1,x2,y2}){ const dx=x2-x1; if(Math.abs(dx)<1e-4) return (y1+y2)/2; const m=(y2-y1)/dx; return y1 + (x-x1)*m; }
-function drawGate(line){ const gh=+els.gateH.value; const {x1,y1,x2,y2}=line; const y1b=y1+gh, y2b=y2+gh; octx.save(); octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2; octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.lineTo(x2,y2b); octx.lineTo(x1,y1b); octx.closePath(); octx.stroke(); octx.restore(); }
+function drawGate(line){ const gh=+els.gateH.value; const {x1,y1,x2,y2}=line; const y1b=y1+gh, y2b=y2+gh; // shade the gate
+  octx.save(); octx.fillStyle='rgba(112,225,255,0.12)'; octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2;
+  octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.lineTo(x2,y2b); octx.lineTo(x1,y1b); octx.closePath(); octx.fill(); octx.stroke(); octx.restore(); }
 
 // ==== LOOP ====
 function loop(){ if(!running) return; anim=requestAnimationFrame(loop); draw(); if(!detecting || !rimLine) return;
   wctx.drawImage(els.video,0,0,work.width,work.height); const curr=wctx.getImageData(0,0,work.width,work.height); if(!loop.prev){ loop.prev=curr; return; } const prev=loop.prev; const dc=curr.data, dp=prev.data; const w=work.width, h=work.height;
-  let movedGate=0,sumGX=0,sumGY=0, movedNet=0;
+
   const gh=+els.gateH.value, minA=+els.minArea.value, maxA=+els.maxArea.value;
-  for(let i=0;i<dc.length;i+=4){ const dr=dc[i]-dp[i], dg=dc[i+1]-dp[i+1], db=dc[i+2]-dp[i+2]; const diff=Math.abs(dr)+Math.abs(dg)+Math.abs(db); if(diff>DIFF_THRESH){ const idx=i/4; const x=idx%w; const y=(idx-x)/w; const sx=x*(els.overlay.width/w), sy=y*(els.overlay.height/h); const yTop=yOnLine(sx,rimLine), yBot=yTop+gh; const insideX = sx>=Math.min(rimLine.x1,rimLine.x2)-8 && sx<=Math.max(rimLine.x1,rimLine.x2)+8; if(insideX && sy>=yTop && sy<=yBot){ movedGate++; sumGX+=x; sumGY+=y; } else if(insideX && sy>yBot && sy<=yBot+gh*0.7){ movedNet++; } } }
-  loop.prev=curr;
-  if(movedGate>=minA && movedGate<=maxA){ const scaleX=els.overlay.width/w, scaleY=els.overlay.height/h; const cx=(sumGX/movedGate)*scaleX, cy=(sumGY/movedGate)*scaleY; octx.save(); octx.fillStyle='#45f0a0'; octx.beginPath(); octx.arc(cx,cy,8,0,Math.PI*2); octx.fill(); octx.restore();
-    const now=performance.now(); const yLine=yOnLine(cx,rimLine); const above=cy<yLine; history.push({t:now,cx,cy,above,net:movedNet}); while(history.length && now-history[0].t>900) history.shift();
-    const wasAbove = history.some(h=>h.above); const isBelow = !above; const first=history[0], last=history[history.length-1]; const downward = (last && first) ? (last.cy-first.cy)>18 : false; const netSum = history.filter(h=> now-h.t<260).reduce((a,b)=>a+b.net,0); const netOK = netSum > +els.netThresh.value; if(wasAbove && isBelow && downward && netOK){ if(!loop.lastFire || now-loop.lastFire>1100){ loop.lastFire=now; els.count.textContent = String(parseInt(els.count.textContent||'0',10)+1); showToast(); speak('Nice shot'); history.length=0; } }
+  const rimWidthPx = Math.hypot(rimLine.x2-rimLine.x1, rimLine.y2-rimLine.y1);
+
+  let movedGate=0,sumGX=0,sumGY=0, movedNet=0;
+  let minSX=Infinity, maxSX=-Infinity; // gate blob horizontal extent in overlay coords
+
+  for(let i=0;i<dc.length;i+=4){ const dr=dc[i]-dp[i], dg=dc[i+1]-dp[i+1], db=dc[i+2]-dp[i+2]; const diff=Math.abs(dr)+Math.abs(dg)+Math.abs(db);
+    if(diff>DIFF_THRESH){ const idx=i/4; const x=idx%w; const y=(idx-x)/w; const sx=x*(els.overlay.width/w), sy=y*(els.overlay.height/h); const yTop=yOnLine(sx,rimLine), yBot=yTop+gh; const insideX = sx>=Math.min(rimLine.x1,rimLine.x2)-8 && sx<=Math.max(rimLine.x1,rimLine.x2)+8;
+      if(insideX && sy>=yTop && sy<=yBot){
+        movedGate++; sumGX+=x; sumGY+=y; if(sx<minSX) minSX=sx; if(sx>maxSX) maxSX=sx;
+        if(els.dbg.checked){ // draw gate motion pixels in red
+          octx.fillStyle='rgba(255,80,80,0.8)'; octx.fillRect(sx, sy, 1.2, 1.2);
+        }
+      } else if(insideX && sy>yBot && sy<=yBot+gh*0.7){ movedNet++; if(els.dbg.checked){ octx.fillStyle='rgba(255,230,80,0.8)'; octx.fillRect(sx, sy, 1.2, 1.2); } }
+    }
   }
+  loop.prev=curr;
+
+  // Compute blob width relative to rim width (overlay coords)
+  const blobWidth = (isFinite(minSX)&&isFinite(maxSX)) ? (maxSX - minSX) : 0;
+  const widthOK = blobWidth >= rimWidthPx*0.33 && blobWidth <= rimWidthPx*0.95;
+
+  // Candidate inside gate by area
+  if(movedGate>=minA && movedGate<=maxA && widthOK){
+    const scaleX=els.overlay.width/w, scaleY=els.overlay.height/h; const cx=(sumGX/movedGate)*scaleX, cy=(sumGY/movedGate)*scaleY;
+    // centroid marker
+    octx.save(); octx.fillStyle='#45f0a0'; octx.beginPath(); octx.arc(cx,cy,8,0,Math.PI*2); octx.fill(); octx.restore();
+
+    const now=performance.now(); const yLine=yOnLine(cx,rimLine); const above=cy<yLine;
+    history.push({t:now,cx,cy,above,net:movedNet}); while(history.length && now-history[0].t>900) history.shift();
+    const wasAbove = history.some(h=>h.above); const isBelow = !above; const first=history[0], last=history[history.length-1]; const downward = (last && first) ? (last.cy-first.cy)>18 : false;
+
+    let passNet = true; // default = no net required
+    if(els.useNet.checked){ const netSum = history.filter(h=> now-h.t<260).reduce((a,b)=>a+b.net,0); passNet = netSum > +els.netThresh.value; }
+
+    if(wasAbove && isBelow && downward && passNet){ if(!loop.lastFire || now-loop.lastFire>1100){ loop.lastFire=now; els.count.textContent = String(parseInt(els.count.textContent||'0',10)+1); showToast(); speak('Nice shot'); history.length=0; } }
+  }
+
+  // Debug HUD: show numbers
+  if(els.dbg.checked){ octx.save(); octx.fillStyle='rgba(0,0,0,0.45)'; octx.fillRect(10,10,280,80); octx.fillStyle='#e8eefc'; octx.font='14px ui-sans-serif'; octx.fillText(`Gate moved: ${movedGate}`, 18, 30); octx.fillText(`Net moved: ${movedNet}`, 18, 50); octx.fillText(`Blob width: ${blobWidth.toFixed(1)} px (Rim: ${rimWidthPx.toFixed(1)} px)`, 18, 70); octx.restore(); }
 }
 
-// ==== CALIBRATION (TWO commits; no finger offset; simple & reliable) ====
-function startCalibration(){ calibrating=true; editing=false; setStatus('Tap LEFT rim edge, then RIGHT rim edge'); let points=[]; const commit=(ev)=>{ ev.preventDefault(); const p=eventToCanvas(ev); points.push(p); // marker
+// ==== CALIBRATION (tap 2 points; simple & reliable) ====
+function startCalibration(){ calibrating=true; editing=false; setStatus('Tap LEFT rim edge, then RIGHT rim edge'); let points=[]; const commit=(ev)=>{ ev.preventDefault(); const p=eventToCanvas(ev); points.push(p); // temp marker
     octx.save(); octx.fillStyle='#ffd166'; octx.beginPath(); octx.arc(p.x,p.y,6,0,Math.PI*2); octx.fill(); octx.restore();
-    if(points.length===2){ els.overlay.removeEventListener('touchstart', commit); els.overlay.removeEventListener('click', commit); rimLine={x1:points[0].x,y1:points[0].y,x2:points[1].x,y2:points[1].y}; calibrating=false; editing=true; draw(); setStatus('Line set. Use nudge controls for precision.'); }
+    if(points.length===2){ els.overlay.removeEventListener('touchstart', commit); els.overlay.removeEventListener('click', commit); rimLine={x1:points[0].x,y1:points[0].y,x2:points[1].x,y2:points[1].y}; calibrating=false; editing=true; draw(); setStatus('Line set. Use Edit to fine tune.'); }
   };
   els.overlay.addEventListener('touchstart', commit, {passive:false}); els.overlay.addEventListener('click', commit, {passive:false}); }
 function eventToCanvas(ev){ const rect=els.overlay.getBoundingClientRect(); const t=ev.touches?ev.touches[0]:ev; const x=(t.clientX-rect.left)*(els.overlay.width/rect.width); const y=(t.clientY-rect.top)*(els.overlay.height/rect.height); return {x,y}; }
 
-// ==== EDITING (drag OR precise nudges) ====
+// ==== EDITING (drag endpoints) ====
 let dragging=null; // 'p1'|'p2'
 els.overlay.addEventListener('touchstart', (ev)=>{ if(!editing || !rimLine) return; const p=eventToCanvas(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } }, {passive:false});
 els.overlay.addEventListener('mousedown', (ev)=>{ if(!editing || !rimLine) return; const p=eventToCanvas(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } });
@@ -156,20 +171,11 @@ els.overlay.addEventListener('touchmove', (ev)=>{ if(!dragging) return; ev.preve
 els.overlay.addEventListener('mousemove', (ev)=>{ if(!dragging) return; const p=eventToCanvas(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); });
 window.addEventListener('touchend', ()=> dragging=null); window.addEventListener('mouseup', ()=> dragging=null);
 
-// Nudge controls
-function nudge(dx,dy){ if(!rimLine) return; const step=+els.step.value; const which=els.p1.checked?'p1':'p2'; const key=which==='p1'?['x1','y1']:['x2','y2']; rimLine[key[0]]+=dx*step; rimLine[key[1]]+=dy*step; draw(); }
-els.nUp.addEventListener('click', ()=> nudge(0,-1)); els.nDown.addEventListener('click', ()=> nudge(0,1)); els.nLeft.addEventListener('click', ()=> nudge(-1,0)); els.nRight.addEventListener('click', ()=> nudge(1,0));
-
-// Presets (no color filter; green ball friendly)
-els.presetLoose.addEventListener('click', ()=>{ DIFF_THRESH=22; els.gateH.value=130; els.minArea.value=90; els.maxArea.value=2800; els.netThresh.value=160; setStatus('Preset: Loose'); });
-els.presetBalanced.addEventListener('click', ()=>{ DIFF_THRESH=26; els.gateH.value=110; els.minArea.value=120; els.maxArea.value=2400; els.netThresh.value=220; setStatus('Preset: Balanced'); });
-els.presetStrict.addEventListener('click', ()=>{ DIFF_THRESH=30; els.gateH.value=90; els.minArea.value=160; els.maxArea.value=2000; els.netThresh.value=300; setStatus('Preset: Strict'); });
-
 // ==== UI wiring ====
 els.btnStart.addEventListener('click', startCam);
 els.btnStop.addEventListener('click', stopAll);
 els.btnCalib.addEventListener('click', startCalibration);
-els.btnEdit.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } editing=!editing; draw(); setStatus(editing?'Editing: drag or nudge endpoints':''); });
+els.btnEdit.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } editing=!editing; draw(); setStatus(editing?'Editing: drag endpoints':'' ); });
 els.btnDetect.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } detecting=true; editing=false; setStatus('Detecting…'); });
 </script>
 </body>
