@@ -1,142 +1,164 @@
-// --- Add these helpers once ---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Mini Hoop Shot Detector — Color‑Tracked Ball (Debug)</title>
+  <style>
+    :root{ --bg:#0b0e13; --ink:#e8eefc; --muted:#9fb0d5; --accent:#70e1ff; --ok:#45f0a0; --warn:#ffd166; --err:#ff6b6b }
+    body{margin:0; background:var(--bg); color:var(--ink); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial}
+    .wrap{max-width:960px; margin:0 auto; padding:14px; display:grid; gap:12px}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.025)); border:1px solid rgba(255,255,255,.08); border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    header.card{padding:10px 12px; display:flex; align-items:center; justify-content:space-between}
+    header h1{font-size:18px; margin:0}
 
+    .video-area{ position:relative; overflow:hidden; border-radius:14px }
+    video{ width:100%; height:auto; display:block; background:#000 }
+    canvas.overlay{ position:absolute; inset:0; width:100%; height:100%; pointer-events:auto; touch-action:none; background:transparent }
+
+    .controls{display:flex; flex-wrap:wrap; gap:10px; padding:10px; align-items:center}
+    .row{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+    button{appearance:none; border:1px solid rgba(255,255,255,.14); background:#1b2231; color:var(--ink); padding:8px 12px; border-radius:10px; font-weight:700; cursor:pointer}
+    button.primary{background:linear-gradient(180deg, #2b7cff, #225de0)}
+    button.danger{background:linear-gradient(180deg, #ff4d6d, #e03a58)}
+    label{font-size:13px; color:var(--muted); display:inline-flex; gap:6px; align-items:center}
+    input[type="range"]{ width:120px }
+
+    .toast{position:fixed; left:50%; top:16px; transform:translateX(-50%) translateY(-20px); opacity:0; background:#10161f; border:1px solid rgba(255,255,255,.14); padding:10px 14px; border-radius:12px; font-weight:800; transition:all .25s ease; z-index:20}
+    .toast.show{transform:translateX(-50%) translateY(0); opacity:1}
+
+    .status{position:fixed; bottom:10px; left:10px; right:10px; background:#10161f; border:1px solid rgba(255,255,255,.12); padding:8px 12px; border-radius:10px; color:var(--muted); font-size:12px; display:none; z-index:30}
+    .status.show{display:block}
+
+    .pill{background:#0f1624; border:1px solid rgba(255,255,255,.12); padding:6px 10px; border-radius:999px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="card"><h1>Mini Hoop Shot Detector — Color‑Tracked Ball (Debug)</h1><span class="pill">Green ball? Tap to sample color</span></header>
+
+    <section class="video-area card" id="videoArea">
+      <video id="video" playsinline muted></video>
+      <canvas class="overlay" id="overlay"></canvas>
+    </section>
+
+    <section class="card">
+      <div class="controls">
+        <div class="row">
+          <button id="btnStart" class="primary">Start camera</button>
+          <button id="btnCalib">Calibrate rim</button>
+          <button id="btnEdit">Edit line</button>
+          <button id="btnPick">Pick ball color</button>
+          <button id="btnDetect">Start detection</button>
+          <button id="btnStop" class="danger">Stop</button>
+          <span class="pill">Baskets: <strong id="count">0</strong></span>
+        </div>
+        <div class="row">
+          <label>Gate height <input type="range" id="gateH" min="60" max="260" value="120"></label>
+          <label>Hue ± <input type="range" id="hRange" min="6" max="40" value="18"></label>
+          <label>Sat min <input type="range" id="sMin" min="10" max="90" value="35"></label>
+          <label>Val min <input type="range" id="vMin" min="10" max="95" value="25"></label>
+          <label>Min pix <input type="range" id="minPix" min="40" max="1800" value="120"></label>
+          <label>Max pix <input type="range" id="maxPix" min="400" max="12000" value="3800"></label>
+          <label>Debug overlay <input type="checkbox" id="dbg" checked></label>
+        </div>
+        <div class="row">
+          <span class="pill">Rim‑normalized width filter: 0.28× ≤ mask width ≤ 0.95× rim</span>
+          <span class="pill">Cooldown 1.2s</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="toast" id="toast">Nice shot! 🏀</div>
+    <div class="status" id="status"></div>
+  </div>
+
+<script>
+// ==== ELEMENTS ====
+const $ = s => document.querySelector(s);
+const els = { video: $('#video'), overlay: $('#overlay'), toast: $('#toast'), status: $('#status'),
+  btnStart: $('#btnStart'), btnStop: $('#btnStop'), btnCalib: $('#btnCalib'), btnEdit: $('#btnEdit'), btnDetect: $('#btnDetect'), btnPick: $('#btnPick'),
+  gateH: $('#gateH'), hRange: $('#hRange'), sMin: $('#sMin'), vMin: $('#vMin'), minPix: $('#minPix'), maxPix: $('#maxPix'), dbg: $('#dbg'), count: $('#count') };
+
+const octx = els.overlay.getContext('2d');
+let stream=null, anim=null, running=false, detecting=false, editing=false, calibrating=false, picking=false;
+let rimLine=null; // {x1,y1,x2,y2}
+let work=document.createElement('canvas');
+let wctx=work.getContext('2d',{willReadFrequently:true});
+let history=[]; let lastFire=0;
+const SCALE=0.35; // lower for speed
+let hueCenter=120; // default near green
+
+function setStatus(msg){ els.status.textContent = msg; els.status.classList.add('show'); clearTimeout(setStatus._t); setStatus._t = setTimeout(()=> els.status.classList.remove('show'), 3500); }
+function showToast(){ els.toast.classList.add('show'); setTimeout(()=> els.toast.classList.remove('show'), 1000); }
+function speak(text){ try{ const u=new SpeechSynthesisUtterance(text); u.rate=1; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){} }
+
+// ==== CAMERA ====
+async function startCam(){ try{ stream=await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false }); els.video.srcObject=stream; await els.video.play(); syncSize(); running=true; setStatus('Camera started'); loop(); }catch(e){ setStatus('Camera error: '+e.message); }}
+function stopAll(){ detecting=false; running=false; editing=false; calibrating=false; picking=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } setStatus('Stopped'); }
+function syncSize(){ els.overlay.width = els.video.videoWidth||640; els.overlay.height=els.video.videoHeight||480; work.width=Math.round(els.overlay.width*SCALE); work.height=Math.round(els.overlay.height*SCALE); draw(); }
+window.addEventListener('resize', ()=> setTimeout(syncSize,150));
+
+// ==== DRAWING / DEBUG ====
+function draw(){ octx.clearRect(0,0,els.overlay.width,els.overlay.height); if(rimLine){ drawLine(rimLine); drawGate(rimLine); if(editing) drawHandles(rimLine); } }
+function drawLine({x1,y1,x2,y2}){ octx.save(); octx.strokeStyle='#70e1ff'; octx.lineWidth=4; octx.setLineDash([8,6]); octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.stroke(); octx.restore(); }
+function drawHandles({x1,y1,x2,y2}){ drawHandle(x1,y1); drawHandle(x2,y2); }
+function drawHandle(x,y){ octx.save(); octx.fillStyle='#70e1ff'; octx.strokeStyle='#03111f'; octx.lineWidth=2; octx.beginPath(); octx.arc(x,y,12,0,Math.PI*2); octx.fill(); octx.stroke(); octx.restore(); }
+function yOnLine(x,{x1,y1,x2,y2}){ const dx=x2-x1; if(Math.abs(dx)<1e-4) return (y1+y2)/2; const m=(y2-y1)/dx; return y1 + (x-x1)*m; }
+function drawGate(line){ const gh=+els.gateH.value; const {x1,y1,x2,y2}=line; const y1b=y1+gh, y2b=y2+gh; octx.save(); octx.fillStyle='rgba(112,225,255,0.12)'; octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2; octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.lineTo(x2,y2b); octx.lineTo(x1,y1b); octx.closePath(); octx.fill(); octx.stroke(); octx.restore(); }
+
+// ==== COLOR HELPERS ====
+function rgb2hsv(r,g,b){ r/=255; g/=255; b/=255; const max=Math.max(r,g,b), min=Math.min(r,g,b); const d=max-min; let h=0; if(d){ if(max===r){ h=(g-b)/d + (g<b?6:0); }else if(max===g){ h=(b-r)/d + 2; }else{ h=(r-g)/d + 4; } h*=60; } const s=max? d/max : 0; const v=max; return [h,s,v]; }
+function hueDist(a,b){ let d=Math.abs(a-b)%360; return d>180? 360-d : d; }
+
+// ==== MAIN LOOP ====
 function gateROI(rim, gateH) {
   const pad = 8;
   const x = Math.min(rim.x1, rim.x2) - pad;
   const w = Math.abs(rim.x2 - rim.x1) + pad*2;
-  const yTop = (rim.y1 + rim.y2) / 2;  // average to avoid slope headaches
+  const yTop = (rim.y1 + rim.y2) / 2;  // average height
   const h = gateH;
-  return {
-    x: Math.max(0, Math.floor(x)),
-    y: Math.max(0, Math.floor(yTop)),
-    w: Math.max(1, Math.floor(w)),
-    h: Math.max(1, Math.floor(h)),
-  };
+  return { x: Math.max(0, Math.floor(x)),
+           y: Math.max(0, Math.floor(yTop)),
+           w: Math.max(1, Math.floor(w)),
+           h: Math.max(1, Math.floor(h)) };
 }
 
 class ROIBackground {
-  constructor() { this.w = 0; this.h = 0; this.buf = null; }
-  resize(w,h) { if (w!==this.w || h!==this.h) { this.w=w; this.h=h; this.buf = new Float32Array(w*h); this.buf.fill(0); this.inited=false; } }
-  // update model toward current luminance
+  constructor() { this.w=0; this.h=0; this.buf=null; }
+  resize(w,h) { if (w!==this.w || h!==this.h) { this.w=w; this.h=h; this.buf=new Float32Array(w*h); this.buf.fill(0); this.inited=false; } }
   update(Y, alpha=0.04) {
-    const N = this.w*this.h;
+    const N=this.w*this.h;
     if (!this.inited) { for (let i=0;i<N;i++) this.buf[i]=Y[i]; this.inited=true; return; }
     for (let i=0;i<N;i++) this.buf[i] = (1-alpha)*this.buf[i] + alpha*Y[i];
   }
 }
 
-// --- In your globals ---
-let roiBG = new ROIBackground();
-let lastFire = 0;
-let history = []; // {t, cy, above}
+// ==== CALIBRATION / EDITING ====
+function startCalibration(){ calibrating=true; editing=false; setStatus('Tap LEFT rim, then RIGHT rim'); let pts=[]; const commit=(ev)=>{ ev.preventDefault(); const p=eventToCanvas(ev); pts.push(p); // marker
+  octx.save(); octx.fillStyle='#ffd166'; octx.beginPath(); octx.arc(p.x,p.y,6,0,Math.PI*2); octx.fill(); octx.restore();
+  if(pts.length===2){ els.overlay.removeEventListener('touchstart', commit); els.overlay.removeEventListener('click', commit); rimLine={x1:pts[0].x,y1:pts[0].y,x2:pts[1].x,y2:pts[1].y}; calibrating=false; editing=true; draw(); setStatus('Rim set.'); } };
+  els.overlay.addEventListener('touchstart', commit, {passive:false}); els.overlay.addEventListener('click', commit, {passive:false}); }
+function eventToCanvas(ev){ const rect=els.overlay.getBoundingClientRect(); const t=ev.touches?ev.touches[0]:ev; const x=(t.clientX-rect.left)*(els.overlay.width/rect.width); const y=(t.clientY-rect.top)*(els.overlay.height/rect.height); return {x,y}; }
 
-// --- Replace your loop() with this color-agnostic version ---
-function loop(){
-  if(!running) return;
-  anim = requestAnimationFrame(loop);
-  draw();
-  if(!detecting || !rimLine) return;
+let dragging=null;
+els.overlay.addEventListener('touchstart', (ev)=>{ if(!editing||!rimLine) return; const p=eventToCanvas(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; dragging = d1<=hs ? 'p1' : (d2<=hs ? 'p2' : null); }, {passive:false});
+els.overlay.addEventListener('mousedown', (ev)=>{ if(!editing||!rimLine) return; const p=eventToCanvas(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; dragging = d1<=hs ? 'p1' : (d2<=hs ? 'p2' : null); });
+els.overlay.addEventListener('touchmove', (ev)=>{ if(!dragging) return; ev.preventDefault(); const p=eventToCanvas(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); }, {passive:false});
+els.overlay.addEventListener('mousemove', (ev)=>{ if(!dragging) return; const p=eventToCanvas(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); });
+window.addEventListener('touchend', ()=> dragging=null); window.addEventListener('mouseup', ()=> dragging=null);
 
-  const gh = +els.gateH.value;                // slider
-  const roi = gateROI(rimLine, gh);           // axis-aligned gate under rim
+// ==== PICK BALL COLOR ====
+function startPick(){ if(!running){ setStatus('Start camera first'); return; } setStatus('Tap the BALL on screen to sample its color'); picking=true; const pick=(ev)=>{ ev.preventDefault(); const rect=els.overlay.getBoundingClientRect(); const t=ev.touches?ev.touches[0]:ev; const x=(t.clientX-rect.left)*(work.width/rect.width); const y=(t.clientY-rect.top)*(work.height/rect.height); const img = wctx.getImageData(0,0,work.width,work.height).data; const i=(Math.floor(y)*work.width + Math.floor(x))*4; const r=img[i], g=img[i+1], b=img[i+2]; const [hh,ss,vv]=rgb2hsv(r,g,b); hueCenter = Math.round(hh); picking=false; els.overlay.removeEventListener('touchstart', pick); els.overlay.removeEventListener('click', pick); setStatus(`Picked hue ≈ ${hueCenter}°`); };
+  els.overlay.addEventListener('touchstart', pick, {passive:false}); els.overlay.addEventListener('click', pick, {passive:false}); }
 
-  // Prepare a 1:1 ROI canvas (no scaling math)
-  if(!loop.roiCanvas){
-    loop.roiCanvas = document.createElement('canvas');
-    loop.roiCtx = loop.roiCanvas.getContext('2d', { willReadFrequently: true });
-  }
-  loop.roiCanvas.width = roi.w;
-  loop.roiCanvas.height = roi.h;
-  loop.roiCtx.drawImage(els.video, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
-
-  const img = loop.roiCtx.getImageData(0, 0, roi.w, roi.h);
-  const d = img.data;
-  const N = roi.w * roi.h;
-
-  // 1) Build luminance buffer
-  const Y = new Float32Array(N);
-  for (let i=0, j=0; i<d.length; i+=4, j++){
-    const r=d[i], g=d[i+1], b=d[i+2];
-    Y[j] = 0.299*r + 0.587*g + 0.114*b;
-  }
-
-  // 2) Update / use background
-  roiBG.resize(roi.w, roi.h);
-  roiBG.update(Y, 0.04); // slow EMA; adapt to lighting drift
-
-  // 3) Motion mask (adaptive)
-  const MOTION_T = 14; // base threshold; adjust with a slider if you like
-  let area=0, minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity, sumX=0, sumY=0;
-
-  for (let y=0, idx=0; y<roi.h; y++){
-    for (let x=0; x<roi.w; x++, idx++){
-      const diff = Math.abs(Y[idx] - roiBG.buf[idx]);
-      if (diff > MOTION_T){
-        area++;
-        sumX += x; sumY += y;
-        if (x<minX) minX=x; if (x>maxX) maxX=x;
-        if (y<minY) minY=y; if (y>maxY) maxY=y;
-        if (els.dbg?.checked) { // red motion pixels
-          octx.fillStyle='rgba(255,80,80,0.8)';
-          octx.fillRect(roi.x + x, roi.y + y, 1.2, 1.2);
-        }
-      }
-    }
-  }
-
-  // 4) Size/shape filters (inside ROI only)
-  if (area === 0) return;
-  const bboxW = (isFinite(minX)&&isFinite(maxX)) ? (maxX-minX+1) : 0;
-  const bboxH = (isFinite(minY)&&isFinite(maxY)) ? (maxY-minY+1) : 0;
-
-  // Rim-relative width check
-  const rimWidthPx = Math.hypot(rimLine.x2 - rimLine.x1, rimLine.y2 - rimLine.y1);
-  const minRimRatio = 0.28, maxRimRatio = 0.95;
-  const widthOK = bboxW >= rimWidthPx*minRimRatio && bboxW <= rimWidthPx*maxRimRatio;
-
-  // Aspect ~ round (avoid very flat/skinny blobs)
-  const aspect = bboxW / Math.max(1, bboxH);
-  const aspectOK = aspect > 0.6 && aspect < 1.6;
-
-  // Solidity proxy (area inside bbox vs bbox area)
-  const solidity = area / (bboxW * bboxH);
-  const solidityOK = solidity > 0.35 && solidity < 0.95;
-
-  // Area guard (ROI-local)
-  const MIN_AREA = 90;     // tweakable
-  const MAX_AREA = 6000;   // tweakable
-  const areaOK = area >= MIN_AREA && area <= MAX_AREA;
-
-  if (!(widthOK && aspectOK && solidityOK && areaOK)) return;
-
-  // 5) Centroid in overlay coords
-  const cx = roi.x + (sumX / area);
-  const cy = roi.y + (sumY / area);
-
-  if (els.dbg?.checked) {
-    // Show ROI, bbox, centroid
-    octx.save();
-    octx.strokeStyle='rgba(0,255,0,0.6)'; octx.strokeRect(roi.x, roi.y, roi.w, roi.h);
-    octx.strokeStyle='rgba(80,200,255,0.9)'; octx.strokeRect(roi.x+minX, roi.y+minY, bboxW, bboxH);
-    octx.fillStyle='#45f0a0'; octx.beginPath(); octx.arc(cx,cy,6,0,Math.PI*2); octx.fill();
-    octx.restore();
-  }
-
-  // 6) Downward crossing vs actual rim line
-  const yLineAtCx = yOnLine(cx, rimLine);
-  const above = cy < yLineAtCx;
-  const now = performance.now();
-  history.push({t:now, cy, above});
-  while (history.length && now - history[0].t > 700) history.shift();
-
-  const wasAbove = history.some(h => h.above);
-  const isBelow  = !above;
-  const first = history[0], last = history[history.length-1];
-  const downward = (last && first) ? (last.cy - first.cy) > 18 : false;
-
-  if (wasAbove && isBelow && downward && (now - lastFire > 1200)) {
-    lastFire = now;
-    if (els.count) els.count.textContent = String((parseInt(els.count.textContent||'0',10))+1);
-    showToast(); speak('Nice shot'); history.length = 0;
-  }
-}
+// ==== UI wiring ====
+els.btnStart.addEventListener('click', startCam);
+els.btnStop.addEventListener('click', stopAll);
+els.btnCalib.addEventListener('click', startCalibration);
+els.btnEdit.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } editing=!editing; draw(); setStatus(editing?'Editing: drag endpoints':''); });
+els.btnDetect.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } detecting=true; editing=false; setStatus('Detecting…'); });
+els.btnPick.addEventListener('click', startPick);
+</script>
+</body>
+</html>
