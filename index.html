@@ -53,11 +53,11 @@
         <button id="btnCalib">Calibrate</button>
         <button id="btnEdit">Edit line</button>
         <label><input type="checkbox" id="chkOffset" checked> Offset finger</label>
-        <label>Offset px <input type="range" id="offsetPx" min="20" max="120" value="48"></label>
-        <label>Gate height <input type="range" id="gateH" min="40" max="200" value="90"></label>
-        <label>Min area <input type="range" id="minArea" min="40" max="800" value="140"></label>
-        <label>Max area <input type="range" id="maxArea" min="300" max="4000" value="1800"></label>
-        <label>Net sensitivity <input type="range" id="netThresh" min="40" max="1200" value="240"></label>
+        <label>Offset px <input type="range" id="offsetPx" min="20" max="120" value="52"></label>
+        <label>Gate height <input type="range" id="gateH" min="40" max="220" value="100"></label>
+        <label>Min area <input type="range" id="minArea" min="40" max="800" value="120"></label>
+        <label>Max area <input type="range" id="maxArea" min="300" max="4000" value="2200"></label>
+        <label>Net sensitivity <input type="range" id="netThresh" min="40" max="1200" value="220"></label>
         <button id="btnDetect">Start detection</button>
         <button id="btnStop" class="danger">Stop</button>
       </div>
@@ -68,7 +68,7 @@
   </div>
 
 <script>
-// ==== ELEMENTS (fix: no '#') ====
+// ==== ELEMENTS ====
 const els = {
   video: document.getElementById('video'),
   overlay: document.getElementById('overlay'),
@@ -93,13 +93,10 @@ let stream=null, anim=null, running=false, detecting=false, editing=false, calib
 let rimLine=null; // {x1,y1,x2,y2}
 const work = document.createElement('canvas');
 const wctx = work.getContext('2d',{willReadFrequently:true});
-const SCALE=0.45, DIFF_THRESH=26; // slightly looser diff
+const SCALE=0.45, DIFF_THRESH=26;
 let history=[];
 
-// ==== STATUS / ERROR HELP ====
-function setStatus(msg){ els.status.textContent = msg; els.status.classList.add('show'); clearTimeout(setStatus._t); setStatus._t = setTimeout(()=> els.status.classList.remove('show'), 4000); }
-window.addEventListener('error', e=>{ setStatus('Script error: '+e.message); });
-
+function setStatus(msg){ els.status.textContent = msg; els.status.classList.add('show'); clearTimeout(setStatus._t); setStatus._t = setTimeout(()=> els.status.classList.remove('show'), 3500); }
 function showToast(){ els.toast.classList.add('show'); setTimeout(()=> els.toast.classList.remove('show'), 1000); }
 function speak(text){ try{ const u=new SpeechSynthesisUtterance(text); u.rate=1; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){} }
 
@@ -110,15 +107,11 @@ async function startCam(){
     const constraints = { video:{ facingMode:{ideal:'environment'}}, audio:false };
     setStatus('Requesting camera…');
     stream = await navigator.mediaDevices.getUserMedia(constraints);
-    els.video.srcObject = stream;
-    await els.video.play();
-    syncSize();
-    running = true; detecting=false; editing=false; calibrating=false;
-    setStatus('Camera started');
-    loop();
+    els.video.srcObject = stream; await els.video.play();
+    syncSize(); running = true; detecting=false; editing=false; calibrating=false; setStatus('Camera started'); loop();
   }catch(e){ setStatus('Camera error: '+e.message); }
 }
-function stopAll(){ detecting=false; running=false; editing=false; calibrating=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } setStatus('Stopped'); }
+function stopAll(){ detecting=false; running=false; editing=false; calibrating=false; dragging=null; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } setStatus('Stopped'); }
 function syncSize(){ els.overlay.width = els.video.videoWidth||640; els.overlay.height=els.video.videoHeight||480; work.width=Math.round(els.overlay.width*SCALE); work.height=Math.round(els.overlay.height*SCALE); draw(); }
 window.addEventListener('resize', ()=> setTimeout(syncSize,150));
 
@@ -128,9 +121,9 @@ function drawLine({x1,y1,x2,y2}){ octx.save(); octx.strokeStyle='#70e1ff'; octx.
 function drawHandles({x1,y1,x2,y2}){ drawHandle(x1,y1); drawHandle(x2,y2); }
 function drawHandle(x,y){ octx.save(); octx.fillStyle='#70e1ff'; octx.strokeStyle='#03111f'; octx.lineWidth=2; octx.beginPath(); octx.arc(x,y,12,0,Math.PI*2); octx.fill(); octx.stroke(); octx.restore(); }
 function yOnLine(x,{x1,y1,x2,y2}){ const dx=x2-x1; if(Math.abs(dx)<1e-4) return (y1+y2)/2; const m=(y2-y1)/dx; return y1 + (x-x1)*m; }
-function drawGate(line){ const gh=+els.gateH.value; const x1=line.x1,y1=line.y1,x2=line.x2,y2=line.y2; const y1b=y1+gh, y2b=y2+gh; octx.save(); octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2; octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.lineTo(x2,y2b); octx.lineTo(x1,y1b); octx.closePath(); octx.stroke(); octx.restore(); }
+function drawGate(line){ const gh=+els.gateH.value; const {x1,y1,x2,y2}=line; const y1b=y1+gh, y2b=y2+gh; octx.save(); octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2; octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.lineTo(x2,y2b); octx.lineTo(x1,y1b); octx.closePath(); octx.stroke(); octx.restore(); }
 
-// ==== MAIN LOOP ====
+// ==== LOOP ====
 function loop(){ if(!running) return; anim=requestAnimationFrame(loop); draw(); if(!detecting || !rimLine) return; // processing
   wctx.drawImage(els.video,0,0,work.width,work.height); const curr=wctx.getImageData(0,0,work.width,work.height); if(!loop.prev){ loop.prev=curr; return; } const prev=loop.prev; const dc=curr.data, dp=prev.data; const w=work.width, h=work.height;
   let movedGate=0,sumGX=0,sumGY=0, movedNet=0;
@@ -144,35 +137,52 @@ function loop(){ if(!running) return; anim=requestAnimationFrame(loop); draw(); 
   }
 }
 
-// ==== CALIBRATION & EDITING (touch-friendly with offset) ====
-function startCalibration(){ calibrating=true; editing=false; let points=[]; const onDown=(ev)=>{ ev.preventDefault(); updateCrosshair(ev); };
-  const onMove=(ev)=>{ if(!calibrating) return; updateCrosshair(ev); };
-  const onUp=(ev)=>{ if(!calibrating) return; const p = clientToCanvasWithOffset(ev); points.push(p); hideCrosshair(); if(points.length===2){ finish(points); } };
-  els.overlay.addEventListener('touchstart', onDown, {passive:false}); els.overlay.addEventListener('mousemove', onMove, {passive:false}); els.overlay.addEventListener('touchmove', onMove, {passive:false}); els.overlay.addEventListener('mouseup', onUp, {passive:false}); els.overlay.addEventListener('touchend', onUp, {passive:false});
-  function finish(pts){ cleanup(); rimLine={x1:pts[0].x,y1:pts[0].y,x2:pts[1].x,y2:pts[1].y}; calibrating=false; editing=true; draw(); }
-  function cleanup(){ els.overlay.removeEventListener('touchstart', onDown); els.overlay.removeEventListener('mousemove', onMove); els.overlay.removeEventListener('touchmove', onMove); els.overlay.removeEventListener('mouseup', onUp); els.overlay.removeEventListener('touchend', onUp); }
+// ==== CALIBRATION (tap-to-set TWO distinct points, offset ABOVE finger) ====
+function startCalibration(){
+  calibrating=true; editing=false; dragging=null; setStatus('Calibrate: tap LEFT rim edge, then RIGHT rim edge');
+  let points = [];
+  const commitPoint = (ev)=>{
+    ev.preventDefault();
+    const p = eventToCanvasAboveFinger(ev);
+    points.push(p);
+    draw(); // re-draw overlays
+    // draw a temporary point marker
+    octx.save(); octx.fillStyle = '#ffd166'; octx.beginPath(); octx.arc(p.x, p.y, 6, 0, Math.PI*2); octx.fill(); octx.restore();
+    // show crosshair briefly where we placed it
+    showCrosshairAt(p.x, p.y);
+    if(points.length===2){ finish(points); }
+  };
+  els.overlay.addEventListener('touchstart', commitPoint, {passive:false});
+  els.overlay.addEventListener('click', commitPoint, {passive:false});
+  function finish(pts){ cleanup(); rimLine = {x1: pts[0].x, y1: pts[0].y, x2: pts[1].x, y2: pts[1].y}; calibrating=false; editing=true; draw(); setStatus('Line set. Use "Edit line" to adjust if needed.'); }
+  function cleanup(){ els.overlay.removeEventListener('touchstart', commitPoint); els.overlay.removeEventListener('click', commitPoint); }
 }
 
-function startEdit(){ if(!rimLine){ alert('Calibrate first.'); return; } editing=!editing; draw(); }
+// Convert finger/click to canvas coords with offset ABOVE finger
+function eventToCanvasAboveFinger(ev){
+  const rect = els.overlay.getBoundingClientRect();
+  const t = ev.touches ? ev.touches[0] : ev;
+  const off = els.chkOffset.checked ? +els.offsetPx.value : 0; // positive = above finger
+  const x = (t.clientX - rect.left) * (els.overlay.width/rect.width);
+  const y = (t.clientY - off - rect.top) * (els.overlay.height/rect.height);
+  return {x,y};
+}
+function showCrosshairAt(x,y){ els.crosshair.style.left = x+'px'; els.crosshair.style.top = y+'px'; els.crosshair.style.display='block'; clearTimeout(showCrosshairAt._t); showCrosshairAt._t = setTimeout(()=> els.crosshair.style.display='none', 400); }
 
-function clientToCanvasWithOffset(ev){ const rect=els.overlay.getBoundingClientRect(); const off = els.chkOffset.checked ? +els.offsetPx.value : 0; const clientX = ev.clientX ?? (ev.touches && ev.touches[0].clientX) ?? (ev.changedTouches && ev.changedTouches[0].clientX); const clientY = ev.clientY ?? (ev.touches && ev.touches[0].clientY) ?? (ev.changedTouches && ev.changedTouches[0].clientY); const x=(clientX-rect.left)*(els.overlay.width/rect.width); const y=((clientY-off)-rect.top)*(els.overlay.height/rect.height); return {x,y}; }
-function updateCrosshair(ev){ const rect=els.overlay.getBoundingClientRect(); const off = els.chkOffset.checked ? +els.offsetPx.value : 0; const clientX = ev.clientX ?? (ev.touches && ev.touches[0].clientX) ?? (ev.changedTouches && ev.changedTouches[0].clientX); const clientY = ev.clientY ?? (ev.touches && ev.touches[0].clientY) ?? (ev.changedTouches && ev.changedTouches[0].clientY); const x=(clientX-rect.left)*(els.overlay.width/rect.width); const y=((clientY-off)-rect.top)*(els.overlay.height/rect.height); els.crosshair.style.left = x+'px'; els.crosshair.style.top = y+'px'; els.crosshair.style.display='block'; }
-function hideCrosshair(){ els.crosshair.style.display='none'; }
-
-// Drag editing
+// ==== EDITING (drag endpoints; also offset ABOVE finger) ====
 let dragging=null; // 'p1'|'p2'
-els.overlay.addEventListener('mousedown', (ev)=>{ if(!editing || !rimLine) return; const p=clientToCanvasWithOffset(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=18; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } });
-els.overlay.addEventListener('mousemove', (ev)=>{ if(!dragging) return; const p=clientToCanvasWithOffset(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); });
-window.addEventListener('mouseup', ()=> dragging=null);
-els.overlay.addEventListener('touchstart', (ev)=>{ if(!editing || !rimLine) return; const p=clientToCanvasWithOffset(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=24; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } });
-els.overlay.addEventListener('touchmove', (ev)=>{ if(!dragging) return; const p=clientToCanvasWithOffset(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); }, {passive:false});
+els.overlay.addEventListener('touchstart', (ev)=>{ if(!editing || !rimLine) return; const p=eventToCanvasAboveFinger(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } }, {passive:false});
+els.overlay.addEventListener('mousedown', (ev)=>{ if(!editing || !rimLine) return; const p=eventToCanvasAboveFinger(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; if(d1<=hs){ dragging='p1'; } else if(d2<=hs){ dragging='p2'; } });
+els.overlay.addEventListener('touchmove', (ev)=>{ if(!dragging) return; ev.preventDefault(); const p=eventToCanvasAboveFinger(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); }, {passive:false});
+els.overlay.addEventListener('mousemove', (ev)=>{ if(!dragging) return; const p=eventToCanvasAboveFinger(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); });
 window.addEventListener('touchend', ()=> dragging=null);
+window.addEventListener('mouseup', ()=> dragging=null);
 
-// ==== UI wiring (explicit) ====
+// ==== UI wiring ====
 els.btnStart.addEventListener('click', startCam);
 els.btnStop.addEventListener('click', stopAll);
 els.btnCalib.addEventListener('click', startCalibration);
-els.btnEdit.addEventListener('click', startEdit);
+els.btnEdit.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } editing = !editing; draw(); setStatus(editing? 'Editing: drag endpoints' : ''); });
 els.btnDetect.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } detecting=true; editing=false; setStatus('Detecting…'); });
 </script>
 </body>
