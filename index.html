@@ -112,27 +112,149 @@ function rgb2hsv(r,g,b){ r/=255; g/=255; b/=255; const max=Math.max(r,g,b), min=
 function hueDist(a,b){ let d=Math.abs(a-b)%360; return d>180? 360-d : d; }
 
 // ==== MAIN LOOP ====
+// --- Add these helpers once ---
+
 function gateROI(rim, gateH) {
   const pad = 8;
   const x = Math.min(rim.x1, rim.x2) - pad;
   const w = Math.abs(rim.x2 - rim.x1) + pad*2;
-  const yTop = (rim.y1 + rim.y2) / 2;  // average height
+  const yTop = (rim.y1 + rim.y2) / 2;  // average to avoid slope headaches
   const h = gateH;
-  return { x: Math.max(0, Math.floor(x)),
-           y: Math.max(0, Math.floor(yTop)),
-           w: Math.max(1, Math.floor(w)),
-           h: Math.max(1, Math.floor(h)) };
+  return {
+    x: Math.max(0, Math.floor(x)),
+    y: Math.max(0, Math.floor(yTop)),
+    w: Math.max(1, Math.floor(w)),
+    h: Math.max(1, Math.floor(h)),
+  };
 }
 
 class ROIBackground {
-  constructor() { this.w=0; this.h=0; this.buf=null; }
-  resize(w,h) { if (w!==this.w || h!==this.h) { this.w=w; this.h=h; this.buf=new Float32Array(w*h); this.buf.fill(0); this.inited=false; } }
+  constructor() { this.w = 0; this.h = 0; this.buf = null; }
+  resize(w,h) { if (w!==this.w || h!==this.h) { this.w=w; this.h=h; this.buf = new Float32Array(w*h); this.buf.fill(0); this.inited=false; } }
+  // update model toward current luminance
   update(Y, alpha=0.04) {
-    const N=this.w*this.h;
+    const N = this.w*this.h;
     if (!this.inited) { for (let i=0;i<N;i++) this.buf[i]=Y[i]; this.inited=true; return; }
     for (let i=0;i<N;i++) this.buf[i] = (1-alpha)*this.buf[i] + alpha*Y[i];
   }
 }
+
+// --- In your globals ---
+let roiBG = new ROIBackground();
+let lastFire = 0;
+let history = []; // {t, cy, above}
+
+// --- Replace your loop() with this color-agnostic version ---
+function loop(){
+  if(!running) return;
+  anim = requestAnimationFrame(loop);
+  draw();
+  if(!detecting || !rimLine) return;
+
+  const gh = +els.gateH.value;                // slider
+  const roi = gateROI(rimLine, gh);           // axis-aligned gate under rim
+
+  // Prepare a 1:1 ROI canvas (no scaling math)
+  if(!loop.roiCanvas){
+    loop.roiCanvas = document.createElement('canvas');
+    loop.roiCtx = loop.roiCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  loop.roiCanvas.width = roi.w;
+  loop.roiCanvas.height = roi.h;
+  loop.roiCtx.drawImage(els.video, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
+
+  const img = loop.roiCtx.getImageData(0, 0, roi.w, roi.h);
+  const d = img.data;
+  const N = roi.w * roi.h;
+
+  // 1) Build luminance buffer
+  const Y = new Float32Array(N);
+  for (let i=0, j=0; i<d.length; i+=4, j++){
+    const r=d[i], g=d[i+1], b=d[i+2];
+    Y[j] = 0.299*r + 0.587*g + 0.114*b;
+  }
+
+  // 2) Update / use background
+  roiBG.resize(roi.w, roi.h);
+  roiBG.update(Y, 0.04); // slow EMA; adapt to lighting drift
+
+  // 3) Motion mask (adaptive)
+  const MOTION_T = 14; // base threshold; adjust with a slider if you like
+  let area=0, minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity, sumX=0, sumY=0;
+
+  for (let y=0, idx=0; y<roi.h; y++){
+    for (let x=0; x<roi.w; x++, idx++){
+      const diff = Math.abs(Y[idx] - roiBG.buf[idx]);
+      if (diff > MOTION_T){
+        area++;
+        sumX += x; sumY += y;
+        if (x<minX) minX=x; if (x>maxX) maxX=x;
+        if (y<minY) minY=y; if (y>maxY) maxY=y;
+        if (els.dbg?.checked) { // red motion pixels
+          octx.fillStyle='rgba(255,80,80,0.8)';
+          octx.fillRect(roi.x + x, roi.y + y, 1.2, 1.2);
+        }
+      }
+    }
+  }
+
+  // 4) Size/shape filters (inside ROI only)
+  if (area === 0) return;
+  const bboxW = (isFinite(minX)&&isFinite(maxX)) ? (maxX-minX+1) : 0;
+  const bboxH = (isFinite(minY)&&isFinite(maxY)) ? (maxY-minY+1) : 0;
+
+  // Rim-relative width check
+  const rimWidthPx = Math.hypot(rimLine.x2 - rimLine.x1, rimLine.y2 - rimLine.y1);
+  const minRimRatio = 0.28, maxRimRatio = 0.95;
+  const widthOK = bboxW >= rimWidthPx*minRimRatio && bboxW <= rimWidthPx*maxRimRatio;
+
+  // Aspect ~ round (avoid very flat/skinny blobs)
+  const aspect = bboxW / Math.max(1, bboxH);
+  const aspectOK = aspect > 0.6 && aspect < 1.6;
+
+  // Solidity proxy (area inside bbox vs bbox area)
+  const solidity = area / (bboxW * bboxH);
+  const solidityOK = solidity > 0.35 && solidity < 0.95;
+
+  // Area guard (ROI-local)
+  const MIN_AREA = 90;     // tweakable
+  const MAX_AREA = 6000;   // tweakable
+  const areaOK = area >= MIN_AREA && area <= MAX_AREA;
+
+  if (!(widthOK && aspectOK && solidityOK && areaOK)) return;
+
+  // 5) Centroid in overlay coords
+  const cx = roi.x + (sumX / area);
+  const cy = roi.y + (sumY / area);
+
+  if (els.dbg?.checked) {
+    // Show ROI, bbox, centroid
+    octx.save();
+    octx.strokeStyle='rgba(0,255,0,0.6)'; octx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+    octx.strokeStyle='rgba(80,200,255,0.9)'; octx.strokeRect(roi.x+minX, roi.y+minY, bboxW, bboxH);
+    octx.fillStyle='#45f0a0'; octx.beginPath(); octx.arc(cx,cy,6,0,Math.PI*2); octx.fill();
+    octx.restore();
+  }
+
+  // 6) Downward crossing vs actual rim line
+  const yLineAtCx = yOnLine(cx, rimLine);
+  const above = cy < yLineAtCx;
+  const now = performance.now();
+  history.push({t:now, cy, above});
+  while (history.length && now - history[0].t > 700) history.shift();
+
+  const wasAbove = history.some(h => h.above);
+  const isBelow  = !above;
+  const first = history[0], last = history[history.length-1];
+  const downward = (last && first) ? (last.cy - first.cy) > 18 : false;
+
+  if (wasAbove && isBelow && downward && (now - lastFire > 1200)) {
+    lastFire = now;
+    if (els.count) els.count.textContent = String((parseInt(els.count.textContent||'0',10))+1);
+    showToast(); speak('Nice shot'); history.length = 0;
+  }
+}
+
 
 // ==== CALIBRATION / EDITING ====
 function startCalibration(){ calibrating=true; editing=false; setStatus('Tap LEFT rim, then RIGHT rim'); let pts=[]; const commit=(ev)=>{ ev.preventDefault(); const p=eventToCanvas(ev); pts.push(p); // marker
