@@ -5,263 +5,78 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
   <title>Mini Hoop Shot Detector</title>
   <style>
-    :root{ --bg:#0b0e13; --panel:#121722; --ink:#e8eefc; --muted:#9fb0d5; --accent:#70e1ff; --ok:#45f0a0; --warn:#ffd166; }
-    html,body{height:100%}
-    body{margin:0; font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; background:#0b0e13; color:var(--ink)}
-    .wrap{max-width:960px; margin:0 auto; padding:16px; display:grid; gap:14px}
-    .card{background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.025)); border:1px solid rgba(255,255,255,.08); border-radius:16px; box-shadow:0 10px 30px rgba(0,0,0,.35)}
-    header.card{padding:12px 14px; display:flex; justify-content:space-between; align-items:center}
-    header h1{font-size:18px; margin:0}
-
-    .video-area{ position:relative; border-radius:16px; overflow:hidden }
-    .video-area video{ display:block; width:100%; height:auto; background:#000 }
-    .video-area canvas.overlay{ position:absolute; inset:0; width:100%; height:100%; pointer-events:auto; background:transparent; touch-action:none }
-
-    .controls{display:flex; flex-wrap:wrap; gap:10px; padding:10px; align-items:center}
-    button{appearance:none; border:1px solid rgba(255,255,255,.14); background:#1b2231; color:var(--ink); padding:10px 14px; border-radius:12px; font-weight:600; cursor:pointer}
-    button.primary{background:linear-gradient(180deg, #2b7cff, #225de0)}
-    button.danger{background:linear-gradient(180deg, #ff4d6d, #e03a58)}
-    label.toggle{display:inline-flex; align-items:center; gap:8px; font-size:14px; color:var(--muted)}
-    input[type="range"]{ width:160px }
-
-    .stats{margin-left:auto; display:flex; gap:12px; color:var(--muted); font-size:14px}
-    .pill{background:#0f1624; border:1px solid rgba(255,255,255,.1); padding:6px 10px; border-radius:999px}
-
-    .toast{position:fixed; left:50%; top:16px; transform:translateX(-50%) translateY(-20px); opacity:0; background:#10161f; border:1px solid rgba(255,255,255,.14); padding:12px 16px; border-radius:14px; font-weight:700; transition:all .3s ease; z-index:10}
+    :root{ --bg:#0b0e13; --ink:#e8eefc; --muted:#9fb0d5; --accent:#70e1ff; --ok:#45f0a0; }
+    body{margin:0; background:var(--bg); color:var(--ink); font-family:sans-serif}
+    .video-area{ position:relative; max-width:800px; margin:0 auto; }
+    video{ width:100%; height:auto; display:block; background:#000 }
+    canvas.overlay{ position:absolute; inset:0; width:100%; height:100%; pointer-events:auto; touch-action:none; background:transparent }
+    .controls{display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin:12px}
+    button{padding:8px 12px; border:none; border-radius:6px; cursor:pointer; font-weight:600}
+    button.primary{background:#2b7cff; color:#fff}
+    button.danger{background:#ff4d6d; color:#fff}
+    .toast{position:fixed; left:50%; top:16px; transform:translateX(-50%) translateY(-20px); opacity:0; background:#10161f; padding:10px 16px; border-radius:8px; font-weight:700; transition:all .3s ease; z-index:10}
     .toast.show{transform:translateX(-50%) translateY(0); opacity:1}
-
-    .handle{width:18px; height:18px; border-radius:50%; background:#70e1ff; border:2px solid #0b0e13; box-shadow:0 0 0 2px rgba(112,225,255,.5)}
+    .magnifier{position:absolute; width:120px; height:120px; border:2px solid var(--accent); border-radius:50%; overflow:hidden; display:none; pointer-events:none; z-index:20}
+    .magnifier canvas{width:100%; height:100%}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <header class="card">
-      <h1>Mini Hoop Shot Detector</h1>
-      <span>Prototype</span>
-    </header>
-
-    <section class="video-area card" id="videoArea">
-      <video id="video" playsinline muted></video>
-      <canvas class="overlay" id="overlay"></canvas>
-    </section>
-
-    <section class="card">
-      <div class="controls">
-        <button id="btnStart" class="primary">Start camera</button>
-        <button id="btnCalib">Calibrate</button>
-        <button id="btnEdit">Edit line</button>
-        <label class="toggle"><input type="checkbox" id="chkColor" checked> Ball color filter</label>
-        <label class="toggle">Gate height <input type="range" id="gateH" min="10" max="160" value="70"></label>
-        <label class="toggle">Min ball area <input type="range" id="minArea" min="80" max="800" value="180"></label>
-        <label class="toggle">Max ball area <input type="range" id="maxArea" min="400" max="4000" value="1600"></label>
-        <label class="toggle">Net sensitivity <input type="range" id="netThresh" min="20" max="2000" value="240"></label>
-        <button id="btnDetect" disabled>Start detection</button>
-        <button id="btnStop" class="danger" disabled>Stop</button>
-        <div class="stats">
-          <span class="pill">FPS: <span id="fps">0</span></span>
-          <span class="pill">Motion: <span id="motion">0</span></span>
-          <span class="pill">Net: <span id="net">0</span></span>
-          <span class="pill">Baskets: <span id="count">0</span></span>
-        </div>
-      </div>
-    </section>
-
-    <div class="toast" id="toast">Nice shot! 🏀</div>
+  <div class="video-area">
+    <video id="video" playsinline muted></video>
+    <canvas class="overlay" id="overlay"></canvas>
+    <div class="magnifier" id="magnifier"><canvas id="magCanvas"></canvas></div>
   </div>
+  <div class="controls">
+    <button id="btnStart" class="primary">Start camera</button>
+    <button id="btnCalib">Calibrate</button>
+    <button id="btnEdit">Edit line</button>
+    <button id="btnDetect">Start detection</button>
+    <button id="btnStop" class="danger">Stop</button>
+  </div>
+  <div class="toast" id="toast">Nice shot! 🏀</div>
 
-  <script>
-    const els = {
-      video: document.getElementById('video'),
-      overlay: document.getElementById('overlay'),
-      btnStart: document.getElementById('btnStart'),
-      btnCalib: document.getElementById('btnCalib'),
-      btnEdit: document.getElementById('btnEdit'),
-      btnDetect: document.getElementById('btnDetect'),
-      btnStop: document.getElementById('btnStop'),
-      fps: document.getElementById('fps'),
-      motion: document.getElementById('motion'),
-      net: document.getElementById('net'),
-      count: document.getElementById('count'),
-      toast: document.getElementById('toast'),
-      gateH: document.getElementById('gateH'),
-      minArea: document.getElementById('minArea'),
-      maxArea: document.getElementById('maxArea'),
-      netThresh: document.getElementById('netThresh'),
-      chkColor: document.getElementById('chkColor'),
-    };
+<script>
+const els={video:document.getElementById('video'),overlay:document.getElementById('overlay'),btnStart:document.getElementById('btnStart'),btnCalib:document.getElementById('btnCalib'),btnEdit:document.getElementById('btnEdit'),btnDetect:document.getElementById('btnDetect'),btnStop:document.getElementById('btnStop'),toast:document.getElementById('toast'),magnifier:document.getElementById('magnifier'),magCanvas:document.getElementById('magCanvas')};
+const octx=els.overlay.getContext('2d');
+let stream=null,anim=null,running=false,detecting=false,editing=false;
+let rimLine=null,history=[];
+const work=document.createElement('canvas');
+const wctx=work.getContext('2d',{willReadFrequently:true});
+const SCALE=0.45,THRESH=28,MIN_AREA=120,MAX_AREA=2000;
 
-    let stream=null, anim=null, running=false, detecting=false, editing=false;
-    let lastTime=performance.now(), frames=0;
+function showToast(){els.toast.classList.add('show');setTimeout(()=>els.toast.classList.remove('show'),1200)}
+function speak(t){try{let u=new SpeechSynthesisUtterance(t);speechSynthesis.cancel();speechSynthesis.speak(u);}catch(e){}}
 
-    const work = document.createElement('canvas');
-    const wctx = work.getContext('2d', { willReadFrequently: true });
-    const octx = els.overlay.getContext('2d');
+async function startCam(){stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});els.video.srcObject=stream;await els.video.play();syncSize();running=true;detecting=false;loop();}
+function stopAll(){detecting=false;running=false;if(anim)cancelAnimationFrame(anim);if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}}
+function syncSize(){els.overlay.width=els.video.videoWidth||640;els.overlay.height=els.video.videoHeight||480;work.width=Math.round(els.overlay.width*SCALE);work.height=Math.round(els.overlay.height*SCALE);}
 
-    const SCALE = 0.45; // processing resolution
-    let DIFF_THRESH = 28; // motion threshold
-    let rimLine = null; // {x1,y1,x2,y2}
-    const history = []; // centroid & side history
+function draw(){octx.clearRect(0,0,els.overlay.width,els.overlay.height);if(rimLine){drawLine(rimLine.x1,rimLine.y1,rimLine.x2,rimLine.y2);drawGate();if(editing){drawHandle(rimLine.x1,rimLine.y1);drawHandle(rimLine.x2,rimLine.y2)}}}
+function drawLine(x1,y1,x2,y2){octx.save();octx.strokeStyle='#70e1ff';octx.lineWidth=3;octx.setLineDash([6,6]);octx.beginPath();octx.moveTo(x1,y1);octx.lineTo(x2,y2);octx.stroke();octx.restore()}
+function drawHandle(x,y){octx.beginPath();octx.arc(x,y,10,0,Math.PI*2);octx.fillStyle='#70e1ff';octx.fill()}
+function gateRect(){const {x1,y1,x2,y2}=rimLine;const wlen=Math.hypot(x2-x1,y2-y1);const ux=(x2-x1)/wlen,uy=(y2-y1)/wlen;const nx=uy,ny=-ux; // flip so gate extends downward
+const gh=100,halfW=wlen*0.45;const cx=(x1+x2)/2,cy=(y1+y2)/2;const topCx=cx,topCy=cy;return{ux,uy,nx,ny,gh,halfW,topCx,topCy}};
+function drawGate(){const g=gateRect();const ax=g.topCx-g.ux*g.halfW,ay=g.topCy-g.uy*g.halfW;const bx=g.topCx+g.ux*g.halfW,by=g.topCy+g.uy*g.halfW;const cx=ax+g.nx*g.gh,cy=ay+g.ny*g.gh;const dx=bx+g.nx*g.gh,dy=by+g.ny*g.gh;octx.save();octx.strokeStyle='rgba(255,255,255,.5)';octx.setLineDash([4,4]);octx.beginPath();octx.moveTo(ax,ay);octx.lineTo(bx,by);octx.lineTo(dx,dy);octx.lineTo(cx,cy);octx.closePath();octx.stroke();octx.restore()}
 
-    function showToast(){ els.toast.classList.add('show'); setTimeout(()=>els.toast.classList.remove('show'), 1200); }
-    function speak(t){ try{ const u=new SpeechSynthesisUtterance(t); u.rate=1; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){} }
+function loop(){if(!running)return;anim=requestAnimationFrame(loop);draw();if(!detecting||!rimLine)return;wctx.drawImage(els.video,0,0,work.width,work.height);const curr=wctx.getImageData(0,0,work.width,work.height);if(!loop.prev){loop.prev=curr;return}const prev=loop.prev;let moved=0,sumX=0,sumY=0;for(let i=0;i<curr.data.length;i+=4){const dr=curr.data[i]-prev.data[i],dg=curr.data[i+1]-prev.data[i+1],db=curr.data[i+2]-prev.data[i+2];const diff=Math.abs(dr)+Math.abs(dg)+Math.abs(db);if(diff>THRESH){const idx=i/4,x=idx%work.width,y=(idx-x)/work.width;moved++;sumX+=x;sumY+=y;}}loop.prev=curr;if(moved>MIN_AREA&&moved<MAX_AREA){const cx=(sumX/moved)*(els.overlay.width/work.width),cy=(sumY/moved)*(els.overlay.height/work.height);octx.beginPath();octx.arc(cx,cy,8,0,Math.PI*2);octx.fillStyle='#45f0a0';octx.fill();const now=performance.now();history.push({t:now,y:cy});while(history.length&&now-history[0].t>800)history.shift();const first=history[0],recent=history[history.length-1];if(first&&recent&&recent.y-first.y>25){if(!loop.lastTrigger||now-loop.lastTrigger>1200){loop.lastTrigger=now;showToast();speak('Nice shot')}}}}
 
-    async function startCam(){
-      try{
-        stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false });
-        els.video.srcObject = stream; await els.video.play();
-        syncCanvasSize();
-        window.addEventListener('resize', syncCanvasSize);
-        els.video.addEventListener('loadedmetadata', syncCanvasSize);
-        running = true; detecting=false; els.btnDetect.disabled=false; els.btnStop.disabled=false; els.btnStart.disabled=true; loop();
-      }catch(err){ alert('Camera error: '+err.message); }
-    }
+function startCalibration(){const points=[];function onTap(ev){ev.preventDefault();const {x,y}=pointerToCanvas(ev);points.push({x,y});showMagnifier(ev);if(points.length===2){els.overlay.removeEventListener('click',onTap);els.overlay.removeEventListener('touchstart',onTap);hideMagnifier();rimLine={x1:points[0].x,y1:points[0].y,x2:points[1].x,y2:points[1].y};draw();}}
+els.overlay.addEventListener('click',onTap,{passive:false});els.overlay.addEventListener('touchstart',onTap,{passive:false});}
 
-    function stopAll(){ detecting=false; running=false; editing=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } els.btnStart.disabled=false; els.btnDetect.disabled=true; els.btnStop.disabled=true; }
+function pointerToCanvas(ev){const rect=els.overlay.getBoundingClientRect();const cx=ev.touches?ev.touches[0].clientX:ev.clientX;const cy=ev.touches?ev.touches[0].clientY:ev.clientY;return{x:(cx-rect.left)*(els.overlay.width/rect.width),y:(cy-rect.top)*(els.overlay.height/rect.height)}}
 
-    function syncCanvasSize(){
-      const vw = els.video.videoWidth || 1280; const vh = els.video.videoHeight || 720;
-      els.overlay.width = vw; els.overlay.height = vh;
-      work.width = Math.round(vw * SCALE); work.height = Math.round(vh * SCALE);
-    }
+// Magnifier logic
+const magCtx=els.magCanvas.getContext('2d');
+function showMagnifier(ev){const rect=els.overlay.getBoundingClientRect();els.magnifier.style.display='block';const clientX=ev.touches?ev.touches[0].clientX:ev.clientX;const clientY=ev.touches?ev.touches[0].clientY:ev.clientY;els.magnifier.style.left=(clientX-60)+'px';els.magnifier.style.top=(clientY-60)+'px';magCtx.drawImage(els.video,clientX-30,clientY-30,60,60,0,0,120,120)}
+function hideMagnifier(){els.magnifier.style.display='none'}
 
-    function draw(){ octx.clearRect(0,0,els.overlay.width,els.overlay.height); if(rimLine){ drawLine(octx,rimLine.x1,rimLine.y1,rimLine.x2,rimLine.y2); drawGate(); if(editing){ drawHandles(); } } }
-
-    function drawLine(ctx,x1,y1,x2,y2,color='#70e1ff'){ ctx.save(); ctx.lineWidth=4; ctx.strokeStyle=color; ctx.setLineDash([8,6]); ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); ctx.restore(); }
-
-    function unit(vx,vy){ const m=Math.hypot(vx,vy)||1; return [vx/m, vy/m]; }
-    function gateRect(){
-      // Build a rectangular "gate" centered on the rim line, extending downward by gateH
-      const {x1,y1,x2,y2}=rimLine; const wlen = Math.hypot(x2-x1, y2-y1); const ux=(x2-x1)/wlen, uy=(y2-y1)/wlen;
-      const nx=-uy, ny=ux; // normal pointing "down" relative to line
-      const gh = +els.gateH.value; const halfW = wlen*0.45; // a bit inside the rim width
-      const cx=(x1+x2)/2, cy=(y1+y2)/2; // center of rim
-      // Top edge slightly below rim to avoid backboard
-      const topOffset = 6; // px
-      const topCx = cx + nx*topOffset, topCy = cy + ny*topOffset;
-      return { cx, cy, ux, uy, nx, ny, halfW, gh, topCx, topCy };
-    }
-
-    function drawGate(){ const g=gateRect(); octx.save(); octx.strokeStyle='rgba(255,255,255,.5)'; octx.setLineDash([4,4]); octx.lineWidth=2; // draw rectangle
-      const ax=g.topCx - g.ux*g.halfW, ay=g.topCy - g.uy*g.halfW;
-      const bx=g.topCx + g.ux*g.halfW, by=g.topCy + g.uy*g.halfW;
-      const cx=ax + g.nx*g.gh, cy=ay + g.ny*g.gh; const dx=bx + g.nx*g.gh, dy=by + g.ny*g.gh;
-      octx.beginPath(); octx.moveTo(ax,ay); octx.lineTo(bx,by); octx.lineTo(dx,dy); octx.lineTo(cx,cy); octx.closePath(); octx.stroke(); octx.restore(); }
-
-    function drawHandles(){ const hs=handleSize(); drawHandle(rimLine.x1,rimLine.y1,hs); drawHandle(rimLine.x2,rimLine.y2,hs); }
-    function handleSize(){ return Math.max(12, Math.min(22, Math.round(els.overlay.width/32))); }
-    function drawHandle(x,y,s){ octx.save(); octx.fillStyle='#70e1ff'; octx.strokeStyle='#0b0e13'; octx.lineWidth=2; octx.beginPath(); octx.arc(x,y,s/2,0,Math.PI*2); octx.fill(); octx.stroke(); octx.restore(); }
-
-    function loop(){ if(!running) return; anim = requestAnimationFrame(loop); if(els.video.readyState<2) return; draw();
-      frames++; const now=performance.now(); if(now-lastTime>500){ els.fps.textContent=Math.round((frames*1000)/(now-lastTime)); frames=0; lastTime=now; }
-      if(!detecting || !rimLine) return;
-
-      // Motion & color analysis within downscaled frame
-      wctx.drawImage(els.video,0,0,work.width,work.height); const curr=wctx.getImageData(0,0,work.width,work.height);
-      if(!loop.prev){ loop.prev=curr; return; } const prev=loop.prev;
-
-      // ROIs: gate area & net area
-      const g=gateRect();
-      // Precompute transforms
-      const scaleX = els.overlay.width/work.width, scaleY = els.overlay.height/work.height;
-      const gh_px = g.gh / scaleY; const halfW_px = g.halfW / scaleX; // gate in processing coords
-      const topCx_px = g.topCx / scaleX, topCy_px = g.topCy / scaleY;
-      const ux=g.ux, uy=g.uy, nx=g.nx, ny=g.ny;
-
-      let moved=0, sumX=0, sumY=0, movedGate=0, sumGX=0, sumGY=0, movedNet=0;
-      let ballPix=0; // color-filtered pixels
-
-      const dc=curr.data, dp=prev.data, w=work.width, h=work.height;
-      for(let i=0;i<dc.length;i+=4){
-        const dr=dc[i]-dp[i], dg=dc[i+1]-dp[i+1], db=dc[i+2]-dp[i+2];
-        const diff = Math.abs(dr)+Math.abs(dg)+Math.abs(db);
-        if(diff>DIFF_THRESH){
-          const idx=i/4; const x=idx%w; const y=(idx-x)/w;
-          moved++; sumX+=x; sumY+=y;
-          // Test if in gate rectangle (processing coords)
-          // vector from top center to point
-          const vx = x - topCx_px; const vy = y - topCy_px;
-          const along = vx*ux + vy*uy; // sideways across rim
-          const down = vx*nx + vy*ny;  // downward through net
-          const inGate = Math.abs(along) <= halfW_px && down >= 0 && down <= gh_px;
-          if(inGate){
-            movedGate++; sumGX+=x; sumGY+=y;
-            if(els.chkColor.checked){
-              const r=dc[i], gch=dc[i+1], b=dc[i+2];
-              if(isBallColor(r,gch,b)) ballPix++;
-            }
-          } else {
-            // net ROI below gate: between gh and gh+gh*0.6
-            if(down>gh_px && down<gh_px*1.6 && Math.abs(along)<=halfW_px){ movedNet++; }
-          }
-        }
-      }
-
-      loop.prev=curr; els.motion.textContent=moved; els.net.textContent=movedNet;
-
-      // Ball candidate in gate
-      if(movedGate>+els.minArea.value && movedGate<+els.maxArea.value){
-        // optional color filter: require some portion of pixels to look "orange"
-        if(!els.chkColor.checked || ballPix>movedGate*0.12){
-          const cx=(sumGX/movedGate)*scaleX, cy=(sumGY/movedGate)*scaleY;
-          octx.save(); octx.fillStyle='#45f0a0'; octx.beginPath(); octx.arc(cx,cy,8,0,Math.PI*2); octx.fill(); octx.restore();
-          const side = pointSideOfLine(cx,cy,rimLine); const now2=performance.now();
-          history.push({t:now2, side, y:cy, movedNet}); while(history.length && now2-history[0].t>900) history.shift();
-
-          // Require: crossed from above to below (side change) + net motion spike within 250ms
-          const hadAbove=history.some(h=>h.side<0); const hadBelow=history.some(h=>h.side>0);
-          const first=history[0], recent=history[history.length-1]; const downward=(recent&&first)?(recent.y-first.y)>18:false;
-
-          const recentNet = history.filter(h=> now2-h.t<300).reduce((a,b)=>a+b.movedNet,0);
-          const netOK = recentNet > +els.netThresh.value; // net swish
-
-          if(hadAbove && hadBelow && downward && netOK){
-            if(!loop.lastTrigger || now2-loop.lastTrigger>1100){ loop.lastTrigger=now2; els.count.textContent=parseInt(els.count.textContent,10)+1; showToast(); speak('Nice shot'); history.length=0; }
-          }
-        }
-      }
-    }
-
-    function isBallColor(r,g,b){
-      // Quick RGB->HSV-ish gate tuned for orange/brown under indoor light
-      // Compute hue angle approx
-      const max=Math.max(r,g,b), min=Math.min(r,g,b); const d=max-min||1; let h=0; if(max===r) h=((g-b)/d)%6; else if(max===g) h=(b-r)/d+2; else h=(r-g)/d+4; h*=60; if(h<0) h+=360;
-      const v=max/255, s=d/max; // saturation and value
-      // accept orange-ish / brown-ish
-      return (s>0.35 && v>0.25 && v<0.95 && (h>10 && h<55));
-    }
-
-    function pointSideOfLine(px,py,line){ return Math.sign( (line.x2-line.x1)*(py-line.y1) - (line.y2-line.y1)*(px-line.x1) ); }
-
-    // --- Calibration & fine-tune (drag handles) ---
-    function startCalibration(){ if(!els.video.videoWidth){ alert('Start camera first.'); return; } const points=[]; function onTap(ev){ ev.preventDefault(); const {x,y}=pointerToCanvas(ev); points.push({x,y}); if(points.length===2){ els.overlay.removeEventListener('click',onTap); els.overlay.removeEventListener('touchstart',onTap); rimLine={x1:points[0].x,y1:points[0].y,x2:points[1].x,y2:points[1].y}; draw(); els.btnDetect.disabled=false; editing=true; }
-      }
-      els.overlay.addEventListener('click', onTap, {passive:false}); els.overlay.addEventListener('touchstart', onTap, {passive:false}); }
-
-    function pointerToCanvas(ev){ const rect=els.overlay.getBoundingClientRect(); const clientX = ev.touches? ev.touches[0].clientX : (ev.clientX ?? ev.changedTouches?.[0]?.clientX); const clientY = ev.touches? ev.touches[0].clientY : (ev.clientY ?? ev.changedTouches?.[0]?.clientY); return { x:(clientX-rect.left)*(els.overlay.width/rect.width), y:(clientY-rect.top)*(els.overlay.height/rect.height) } }
-
-    let dragging=null; // 'p1' or 'p2'
-    function startEdit(){ if(!rimLine){ alert('Calibrate first.'); return; } editing=!editing; draw(); }
-
-    els.overlay.addEventListener('touchstart', onDown, {passive:false});
-    els.overlay.addEventListener('mousedown', onDown);
-    function onDown(ev){ if(!editing || !rimLine) return; ev.preventDefault(); const {x,y}=pointerToCanvas(ev); const hs=handleSize(); if(Math.hypot(x-rimLine.x1,y-rimLine.y1)<=hs){ dragging='p1'; } else if(Math.hypot(x-rimLine.x2,y-rimLine.y2)<=hs){ dragging='p2'; } }
-    window.addEventListener('touchmove', onMove, {passive:false}); window.addEventListener('mousemove', onMove);
-    function onMove(ev){ if(!dragging) return; ev.preventDefault(); const {x,y}=pointerToCanvas(ev); if(dragging==='p1'){ rimLine.x1=x; rimLine.y1=y; } else { rimLine.x2=x; rimLine.y2=y; } draw(); }
-    window.addEventListener('touchend', onUp); window.addEventListener('mouseup', onUp);
-    function onUp(){ dragging=null; }
-
-    function startDetection(){ if(!rimLine){ alert('Calibrate first.'); return; } detecting=true; editing=false; }
-
-    // UI wiring
-    els.btnStart.addEventListener('click', startCam);
-    els.btnStop.addEventListener('click', stopAll);
-    els.btnCalib.addEventListener('click', startCalibration);
-    els.btnEdit.addEventListener('click', startEdit);
-    els.btnDetect.addEventListener('click', startDetection);
-    els.gateH.addEventListener('input', draw);
-
-    window.addEventListener('orientationchange', ()=> setTimeout(syncCanvasSize, 250));
-  </script>
+els.btnStart.addEventListener('click',startCam);
+els.btnStop.addEventListener('click',stopAll);
+els.btnCalib.addEventListener('click',startCalibration);
+els.btnDetect.addEventListener('click',()=>{detecting=true});
+els.btnEdit.addEventListener('click',()=>{editing=!editing});
+</script>
 </body>
 </html>
+
 
