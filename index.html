@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-  <title>Mini Hoop Shot Detector — ROI Motion + Blob Tracking</title>
+  <title>Mini Hoop Shot Detector — Tripwire Energy (Fresh Start)</title>
   <style>
-    :root{ --bg:#0b0e13; --ink:#e8eefc; --muted:#9fb0d5; --accent:#70e1ff; --ok:#45f0a0 }
+    :root{ --bg:#0b0e13; --ink:#e8eefc; --muted:#9fb0d5; --accent:#70e1ff; --ok:#45f0a0; --warn:#ffd166; --err:#ff6b6b }
     body{margin:0;background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
     .wrap{max-width:960px;margin:0 auto;padding:14px;display:grid;gap:12px}
     .card{background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.025));border:1px solid rgba(255,255,255,.08);border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
@@ -31,8 +31,8 @@
 <body>
   <div class="wrap">
     <header class="card">
-      <h1>Mini Hoop Shot Detector — ROI Motion + Blob Tracking</h1>
-      <span class="pill">Downward crossing • No color • No net</span>
+      <h1>Mini Hoop Shot Detector — Tripwire Energy (Fresh Start)</h1>
+      <span class="pill">Two stripes • Directional • No color/net</span>
     </header>
 
     <section class="video-area card">
@@ -50,15 +50,15 @@
           <button id="btnStop" class="danger">Stop</button>
           <span class="pill">Baskets: <strong id="count">0</strong></span>
           <label>Debug <input type="checkbox" id="dbg" checked></label>
-          <label>Show motion <input type="checkbox" id="showMotion" checked></label>
+          <label>Show columns <input type="checkbox" id="showCols" checked></label>
         </div>
         <div class="row">
-          <label>Gate height <input type="range" id="gateH" min="80" max="240" value="130"></label>
-          <label>Motion T <input type="range" id="motT" min="6" max="40" value="14"></label>
-          <label>Min area <input type="range" id="minA" min="50" max="3000" value="120"></label>
-          <label>Max area <input type="range" id="maxA" min="500" max="20000" value="6000"></label>
-          <label>Min rim ratio <input type="range" id="minRR" min="10" max="60" value="28"></label>
-          <label>Max rim ratio <input type="range" id="maxRR" min="70" max="120" value="95"></label>
+          <label>Gate height <input type="range" id="gateH" min="80" max="260" value="140"></label>
+          <label>Band px <input type="range" id="band" min="4" max="24" value="10"></label>
+          <label>Motion T <input type="range" id="motT" min="4" max="40" value="14"></label>
+          <label>Min rim % <input type="range" id="minRR" min="10" max="60" value="28"></label>
+          <label>Max rim % <input type="range" id="maxRR" min="70" max="120" value="95"></label>
+          <label>Window ms <input type="range" id="win" min="80" max="600" value="260"></label>
         </div>
       </div>
     </section>
@@ -68,226 +68,226 @@
   </div>
 
 <script>
-/* ---------- Elements ---------- */
+// ===== Elements/State =====
 const $ = s => document.querySelector(s);
 const els = {
   video: $('#video'), overlay: $('#overlay'),
   btnStart: $('#btnStart'), btnCalib: $('#btnCalib'), btnEdit: $('#btnEdit'), btnDetect: $('#btnDetect'), btnStop: $('#btnStop'),
-  gateH: $('#gateH'), motT: $('#motT'), minA: $('#minA'), maxA: $('#maxA'), minRR: $('#minRR'), maxRR: $('#maxRR'),
-  dbg: $('#dbg'), showMotion: $('#showMotion'), toast: $('#toast'), status: $('#status'), count: $('#count')
+  gateH: $('#gateH'), band: $('#band'), motT: $('#motT'), minRR: $('#minRR'), maxRR: $('#maxRR'), win: $('#win'),
+  dbg: $('#dbg'), showCols: $('#showCols'), toast: $('#toast'), status: $('#status'), count: $('#count')
 };
 const octx = els.overlay.getContext('2d');
-
-/* ---------- State ---------- */
 let stream=null, anim=null, running=false, detecting=false, editing=false, calibrating=false;
 let rimLine=null; // {x1,y1,x2,y2}
-let lastFire=0;
-let history=[]; // {t, cy, above}
+let lastTopTime=0, lastFire=0;
 
-/* ---------- Utils ---------- */
 function setStatus(msg){ els.status.textContent = msg; els.status.classList.add('show'); clearTimeout(setStatus._t); setStatus._t = setTimeout(()=> els.status.classList.remove('show'), 3500); }
 function showToast(){ els.toast.classList.add('show'); setTimeout(()=> els.toast.classList.remove('show'), 1000); }
 function speak(text){ try{ const u=new SpeechSynthesisUtterance(text); u.rate=1; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){} }
 
-function yOnLine(x,{x1,y1,x2,y2}){ const dx=x2-x1; if(Math.abs(dx)<1e-4) return (y1+y2)/2; const m=(y2-y1)/dx; return y1 + (x-x1)*m; }
-
+// ===== Draw helpers =====
 function draw(){ octx.clearRect(0,0,els.overlay.width,els.overlay.height); if(rimLine){ drawLine(rimLine); drawGate(rimLine); if(editing) drawHandles(rimLine); } }
 function drawLine({x1,y1,x2,y2}){ octx.save(); octx.strokeStyle='#70e1ff'; octx.lineWidth=4; octx.setLineDash([8,6]); octx.beginPath(); octx.moveTo(x1,y1); octx.lineTo(x2,y2); octx.stroke(); octx.restore(); }
 function drawHandles({x1,y1,x2,y2}){ drawHandle(x1,y1); drawHandle(x2,y2); }
 function drawHandle(x,y){ octx.save(); octx.fillStyle='#70e1ff'; octx.strokeStyle='#03111f'; octx.lineWidth=2; octx.beginPath(); octx.arc(x,y,12,0,Math.PI*2); octx.fill(); octx.stroke(); octx.restore(); }
-function drawGate(line){ const gh=+els.gateH.value; const {x1,y1,x2,y2}=line; const yTop=(y1+y2)/2; const x = Math.min(x1,x2)-8, w = Math.abs(x2-x1)+16, y = yTop, h = gh; octx.save(); octx.fillStyle='rgba(112,225,255,0.12)'; octx.strokeStyle='rgba(255,255,255,.6)'; octx.setLineDash([4,4]); octx.lineWidth=2; octx.fillRect(x,y,w,h); octx.strokeRect(x,y,w,h); octx.restore(); }
+function yOnLine(x,{x1,y1,x2,y2}){ const dx=x2-x1; if(Math.abs(dx)<1e-4) return (y1+y2)/2; const m=(y2-y1)/dx; return y1 + (x-x1)*m; }
+function drawGate(line){ const gh=+els.gateH.value; const {x1,y1,x2,y2}=line; const yTop=(y1+y2)/2; const x = Math.min(x1,x2)-8, w=Math.abs(x2-x1)+16, y=yTop, h=gh; octx.save(); octx.fillStyle='rgba(112,225,255,0.10)'; octx.strokeStyle='rgba(255,255,255,.55)'; octx.setLineDash([4,4]); octx.lineWidth=2; octx.fillRect(x,y,w,h); octx.strokeRect(x,y,w,h); octx.restore(); }
 
-/* ---------- Gate ROI ---------- */
-function gateROI(rim, gateH) {
-  const pad = 8;
-  const x = Math.min(rim.x1, rim.x2) - pad;
-  const w = Math.abs(rim.x2 - rim.x1) + pad*2;
-  const yTop = (rim.y1 + rim.y2) / 2;
-  const h = gateH;
-  return { x: Math.max(0, Math.floor(x)), y: Math.max(0, Math.floor(yTop)), w: Math.max(1, Math.floor(w)), h: Math.max(1, Math.floor(h)) };
-}
-
-/* ---------- Background model in ROI ---------- */
-class ROIBackground {
-  constructor() { this.w=0; this.h=0; this.buf=null; this.inited=false; }
-  resize(w,h){ if(w!==this.w || h!==this.h){ this.w=w; this.h=h; this.buf=new Float32Array(w*h); this.buf.fill(0); this.inited=false; } }
-  update(Y, alpha=0.04){ const N=this.w*this.h; if(!this.inited){ for(let i=0;i<N;i++) this.buf[i]=Y[i]; this.inited=true; return; } for(let i=0;i<N;i++) this.buf[i] = (1-alpha)*this.buf[i] + alpha*Y[i]; }
-}
-let roiBG = new ROIBackground();
-
-/* ---------- Camera ---------- */
-async function startCam(){ if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ setStatus('Camera API not available.'); return; } try{ stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false }); els.video.srcObject = stream; await els.video.play(); syncSize(); running=true; setStatus('Camera started'); loop(); }catch(e){ setStatus('Camera error: '+e.message); } }
+// ===== Camera =====
+async function startCam(){ if(!navigator.mediaDevices?.getUserMedia){ setStatus('Camera API not available.'); return; } try{ stream=await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false }); els.video.srcObject=stream; await els.video.play(); syncSize(); running=true; setStatus('Camera started'); loop(); }catch(e){ setStatus('Camera error: '+e.message); } }
 function stopAll(){ detecting=false; running=false; editing=false; calibrating=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } setStatus('Stopped'); }
 function syncSize(){ els.overlay.width = els.video.videoWidth||640; els.overlay.height = els.video.videoHeight||480; draw(); }
 window.addEventListener('resize', ()=> setTimeout(syncSize,150));
 
-/* ---------- Calibration & Editing ---------- */
+// ===== Calibration / Editing =====
 function eventToCanvas(ev){ const rect=els.overlay.getBoundingClientRect(); const t=ev.touches?ev.touches[0]:ev; const x=(t.clientX-rect.left)*(els.overlay.width/rect.width); const y=(t.clientY-rect.top)*(els.overlay.height/rect.height); return {x,y}; }
 function startCalibration(){ calibrating=true; editing=false; setStatus('Tap LEFT rim edge, then RIGHT rim edge'); let pts=[]; const commit=(ev)=>{ ev.preventDefault(); const p=eventToCanvas(ev); pts.push(p); octx.save(); octx.fillStyle='#ffd166'; octx.beginPath(); octx.arc(p.x,p.y,6,0,Math.PI*2); octx.fill(); octx.restore(); if(pts.length===2){ els.overlay.removeEventListener('touchstart', commit); els.overlay.removeEventListener('click', commit); rimLine={x1:pts[0].x,y1:pts[0].y,x2:pts[1].x,y2:pts[1].y}; calibrating=false; editing=true; draw(); setStatus('Rim set. Use Edit to fine tune.'); } }; els.overlay.addEventListener('touchstart', commit, {passive:false}); els.overlay.addEventListener('click', commit, {passive:false}); }
-let dragging=null; // 'p1'|'p2'
-els.overlay.addEventListener('touchstart', (ev)=>{ if(!editing||!rimLine) return; const p=eventToCanvas(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; dragging = d1<=hs ? 'p1' : (d2<=hs ? 'p2' : null); }, {passive:false});
+let dragging=null; els.overlay.addEventListener('touchstart', (ev)=>{ if(!editing||!rimLine) return; const p=eventToCanvas(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; dragging = d1<=hs ? 'p1' : (d2<=hs ? 'p2' : null); }, {passive:false});
 els.overlay.addEventListener('mousedown', (ev)=>{ if(!editing||!rimLine) return; const p=eventToCanvas(ev); const d1=Math.hypot(p.x-rimLine.x1,p.y-rimLine.y1), d2=Math.hypot(p.x-rimLine.x2,p.y-rimLine.y2); const hs=22; dragging = d1<=hs ? 'p1' : (d2<=hs ? 'p2' : null); });
 els.overlay.addEventListener('touchmove', (ev)=>{ if(!dragging) return; ev.preventDefault(); const p=eventToCanvas(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); }, {passive:false});
 els.overlay.addEventListener('mousemove', (ev)=>{ if(!dragging) return; const p=eventToCanvas(ev); if(dragging==='p1'){ rimLine.x1=p.x; rimLine.y1=p.y; } else { rimLine.x2=p.x; rimLine.y2=p.y; } draw(); });
 window.addEventListener('touchend', ()=> dragging=null);
 window.addEventListener('mouseup', ()=> dragging=null);
 
-/* ---------- Connected Components ---------- */
-function labelBlobs(mask, w, h) {
-  const visited = new Uint8Array(w*h);
-  const blobs = [];
-  const stackX = new Int32Array(w*h);
-  const stackY = new Int32Array(w*h);
-  const idx = (x,y)=> y*w + x;
-  for (let y=0; y<h; y++) {
-    for (let x=0; x<w; x++) {
-      const i = idx(x,y);
-      if (!mask[i] || visited[i]) continue;
-      let top = 0;
-      stackX[top] = x; stackY[top] = y; top++;
-      visited[i] = 1;
-      let minX=x, maxX=x, minY=y, maxY=y;
-      let area = 0, sumX=0, sumY=0;
-      while (top>0) {
-        top--;
-        const cx = stackX[top], cy = stackY[top];
-        const ci = idx(cx,cy);
-        area++; sumX += cx; sumY += cy;
-        if (cx<minX) minX=cx; if (cx>maxX) maxX=cx;
-        if (cy<minY) minY=cy; if (cy>maxY) maxY=cy;
-        // 4-connected neighbors
-        if (cx>0)   { const ni=ci-1;      if (mask[ni] && !visited[ni]) { visited[ni]=1; stackX[top]=cx-1; stackY[top]=cy; top++; } }
-        if (cx<w-1) { const ni=ci+1;      if (mask[ni] && !visited[ni]) { visited[ni]=1; stackX[top]=cx+1; stackY[top]=cy; top++; } }
-        if (cy>0)   { const ni=ci-w;      if (mask[ni] && !visited[ni]) { visited[ni]=1; stackX[top]=cx;   stackY[top]=cy-1; top++; } }
-        if (cy<h-1) { const ni=ci+w;      if (mask[ni] && !visited[ni]) { visited[ni]=1; stackX[top]=cx;   stackY[top]=cy+1; top++; } }
-      }
-      const bboxW = maxX-minX+1, bboxH = maxY-minY+1;
-      const cx = sumX/area, cy = sumY/area;
-      const solidity = area / (bboxW * bboxH);
-      blobs.push({ area, minX, minY, maxX, maxY, bboxW, bboxH, cx, cy, solidity });
-    }
-  }
-  return blobs;
+// ===== Tripwire ROI (rotated) =====
+function makeBasis(x1,y1,x2,y2){
+  const dx=x2-x1, dy=y2-y1; const len=Math.hypot(dx,dy)||1;
+  const utx=dx/len, uty=dy/len; // tangent
+  let unx=-uty, uny=utx;        // normal (90° CCW)
+  // ensure normal points "down" on screen (positive y)
+  if(uny<0){ unx=-unx; uny=-uny; }
+  return {utx,uty,unx,uny,len};
 }
 
-/* ---------- Detection loop (ROI + background + blob pick) ---------- */
+// Build transform from video coords -> ROI coords so the rim is horizontal at y = band
+function setRoiTransform(ctx, P0, basis, pad, band){
+  const {utx,uty,unx,uny} = basis; const [x0,y0]=P0;
+  // x' = ut·p + e;  y' = un·p + f
+  const e = pad - (utx*x0 + uty*y0);
+  const f = band - (unx*x0 + uny*y0);
+  ctx.setTransform(utx, unx, uty, uny, e, f);
+}
+
+// ===== Detection loop =====
 function loop(){
   if(!running) return;
-  anim = requestAnimationFrame(loop);
+  anim=requestAnimationFrame(loop);
   draw();
   if(!detecting || !rimLine) return;
 
-  const gh = +els.gateH.value;
-  const roi = gateROI(rimLine, gh);
+  const pad=10;                 // horizontal margin left/right
+  const band=+els.band.value;   // stripe thickness (px)
+  const gh=+els.gateH.value;    // gate height (roi distance between top & bottom stripes)
+  const motT=+els.motT.value;   // per-pixel diff threshold
+  const win=+els.win.value;     // ms to see bottom after top
 
-  // ROI canvas 1:1
-  if(!loop.roiCanvas){
-    loop.roiCanvas = document.createElement('canvas');
-    loop.roiCtx = loop.roiCanvas.getContext('2d', { willReadFrequently: true });
-  }
-  loop.roiCanvas.width = roi.w;
-  loop.roiCanvas.height = roi.h;
-  loop.roiCtx.drawImage(els.video, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
+  const {utx,uty,unx,uny,len:rimLen} = makeBasis(rimLine.x1,rimLine.y1,rimLine.x2,rimLine.y2);
 
-  const img = loop.roiCtx.getImageData(0, 0, roi.w, roi.h);
+  // ROI canvas sized to rim length + pad*2 by (band*2 + gh)
+  const roiW = Math.max(1, Math.floor(rimLen + pad*2));
+  const roiH = Math.max(1, Math.floor(band*2 + gh));
+
+  if(!loop.roi){ loop.roi=document.createElement('canvas'); loop.rc=loop.roi.getContext('2d', {willReadFrequently:true}); }
+  const rc=loop.rc; loop.roi.width=roiW; loop.roi.height=roiH;
+
+  // Draw transformed video into ROI coords
+  rc.save();
+  rc.clearRect(0,0,roiW,roiH);
+  setRoiTransform(rc, [rimLine.x1,rimLine.y1], {utx,uty,unx,uny}, pad, band);
+  rc.drawImage(els.video, 0, 0); // whole frame, transformed
+  rc.restore();
+
+  const img = rc.getImageData(0,0,roiW,roiH);
   const d = img.data;
-  const N = roi.w * roi.h;
+  const N = roiW*roiH;
 
-  // 1) Luminance buffer
+  // grayscale current frame in ROI
+  if(!loop.prevY || loop.prevY.length!==N) loop.prevY = new Float32Array(N).fill(0);
   const Y = new Float32Array(N);
-  for (let i=0, j=0; i<d.length; i+=4, j++){
+  for(let i=0,j=0;i<d.length;i+=4,j++){
     const r=d[i], g=d[i+1], b=d[i+2];
     Y[j] = 0.299*r + 0.587*g + 0.114*b;
   }
 
-  // 2) Update background
-  roiBG.resize(roi.w, roi.h);
-  roiBG.update(Y, 0.04);
+  // abs diff with previous ROI frame
+  const diff = new Float32Array(N);
+  for(let i=0;i<N;i++){ diff[i] = Math.abs(Y[i]-loop.prevY[i]); }
+  loop.prevY = Y;
 
-  // 3) Motion mask
-  const MOTION_T = +els.motT.value;
-  const mask = new Uint8Array(N);
-  for (let y=0, k=0; y<roi.h; y++) {
-    for (let x=0; x<roi.w; x++, k++) {
-      const diff = Math.abs(Y[k] - roiBG.buf[k]);
-      if (diff > MOTION_T) mask[k] = 1;
-    }
+  // column energy inside two horizontal bands
+  const topY0 = Math.max(0, Math.floor(band - Math.floor(band/2)));
+  const topY1 = Math.min(roiH, topY0 + band);
+  const botY0 = Math.max(0, Math.floor(band + gh - Math.floor(band/2)));
+  const botY1 = Math.min(roiH, botY0 + band);
+
+  const topCol = new Float32Array(roiW);
+  const botCol = new Float32Array(roiW);
+  for(let y=topY0; y<topY1; y++){
+    let idx=y*roiW; for(let x=0;x<roiW;x++,idx++){ topCol[x]+=diff[idx]; }
+  }
+  for(let y=botY0; y<botY1; y++){
+    let idx=y*roiW; for(let x=0;x<roiW;x++,idx++){ botCol[x]+=diff[idx]; }
   }
 
-  // Optional: show raw motion pixels
-  if (els.dbg.checked && els.showMotion.checked) {
-    for (let y=0, k=0; y<roi.h; y++) {
-      for (let x=0; x<roi.w; x++, k++) {
-        if (mask[k]) {
-          octx.fillStyle='rgba(255,80,80,0.85)';
-          octx.fillRect(roi.x + x, roi.y + y, 1.2, 1.2);
-        }
-      }
-    }
-  }
+  // per-column activation
+  const thr = motT * band; // simple model; adjust motT slider to fit
+  const actTop = new Uint8Array(roiW);
+  const actBot = new Uint8Array(roiW);
+  for(let x=0;x<roiW;x++){ actTop[x] = topCol[x] > thr ? 1 : 0; actBot[x] = botCol[x] > thr ? 1 : 0; }
 
-  // 4) Connected components -> choose best blob
-  const blobs = labelBlobs(mask, roi.w, roi.h);
-  if (!blobs.length) return;
+  // contiguous width of activation (longest span)
+  function longestSpan(act){ let best=0, cur=0; for(let i=0;i<act.length;i++){ if(act[i]){ cur++; if(cur>best) best=cur; } else cur=0; } return best; }
+  const spanTop = longestSpan(actTop);
+  const spanBot = longestSpan(actBot);
 
-  const rimWidthPx = Math.hypot(rimLine.x2 - rimLine.x1, rimLine.y2 - rimLine.y1);
-  const minRimRatio = (+els.minRR.value)/100, maxRimRatio = (+els.maxRR.value)/100;
-  const MIN_AREA = +els.minA.value, MAX_AREA = +els.maxA.value;
+  // rim-relative gating
+  const minRR = (+els.minRR.value)/100, maxRR=(+els.maxRR.value)/100;
+  const minCols = Math.floor(roiW * minRR);
+  const maxCols = Math.floor(roiW * maxRR);
 
-  let best=null, bestScore=-1;
-  for (const b of blobs) {
-    const { area, bboxW, bboxH, solidity } = b;
-    const aspect = bboxW / Math.max(1, bboxH);
-    const widthOK = bboxW >= rimWidthPx*minRimRatio && bboxW <= rimWidthPx*maxRimRatio;
-    const aspectOK = aspect > 0.6 && aspect < 1.6;
-    const solidityOK = solidity > 0.35 && solidity < 0.95;
-    const areaOK = area >= MIN_AREA && area <= MAX_AREA;
-    if (!(widthOK && aspectOK && solidityOK && areaOK)) continue;
-    const compact = 1 - Math.abs(solidity - 0.7); // prefer near-compact blobs
-    const score = area * compact;
-    if (score > bestScore) { bestScore = score; best = b; }
-  }
-  if (!best) return;
-
-  // 5) Chosen blob visuals
-  const cx = roi.x + best.cx;
-  const cy = roi.y + best.cy;
-  if (els.dbg.checked) {
-    octx.save();
-    octx.strokeStyle='rgba(0,255,0,0.6)'; octx.strokeRect(roi.x, roi.y, roi.w, roi.h);
-    octx.strokeStyle='rgba(80,200,255,0.9)'; octx.strokeRect(roi.x+best.minX, roi.y+best.minY, best.bboxW, best.bboxH);
-    octx.fillStyle='#45f0a0'; octx.beginPath(); octx.arc(cx,cy,6,0,Math.PI*2); octx.fill();
-    octx.restore();
-  }
-
-  // 6) Downward crossing vs rim line
-  const yLineAtCx = yOnLine(cx, rimLine);
-  const above = cy < yLineAtCx;
   const now = performance.now();
-  history.push({t:now, cy, above});
-  while (history.length && now - history[0].t > 700) history.shift();
+  const topOK = spanTop >= minCols && spanTop <= maxCols;
+  const botOK = spanBot >= minCols && spanBot <= maxCols;
 
-  const wasAbove = history.some(h => h.above);
-  const isBelow  = !above;
-  const first = history[0], last = history[history.length-1];
-  const downward = (last && first) ? (last.cy - first.cy) > 18 : false;
-
-  if (wasAbove && isBelow && downward && (now - lastFire > 1200)) {
-    lastFire = now;
+  // Directional state machine: need a recent top hit followed by bottom
+  if(topOK){ lastTopTime = now; }
+  const hasRecentTop = (now - lastTopTime) > 20 && (now - lastTopTime) < win; // small delay then within window
+  if(botOK && hasRecentTop && (now - lastFire > 1200)){
+    lastFire = now; lastTopTime = 0;
     els.count.textContent = String((parseInt(els.count.textContent||'0',10))+1);
-    showToast(); speak('Nice shot'); history.length = 0;
+    showToast(); speak('Nice shot');
+  }
+
+  // ===== Debug overlay =====
+  if(els.dbg.checked){
+    // Draw ROI rectangle back into overlay for reference
+    // We'll draw a faint box at the rim location using the forward mapping of ROI corners back to overlay
+    octx.save();
+    // draw stripes in overlay by sampling a few points across and mapping back
+    drawStripeOverlay(rimLine, {utx,uty,unx,uny}, pad, band, gh, roiW, roiH, actTop, actBot);
+    // HUD text
+    octx.fillStyle='rgba(0,0,0,0.45)'; octx.fillRect(10,10,330,64);
+    octx.fillStyle='#e8eefc'; octx.font='14px ui-sans-serif';
+    octx.fillText(`Top span: ${spanTop} / ${roiW} (min ${minCols})`, 18, 32);
+    octx.fillText(`Bottom span: ${spanBot} / ${roiW}`, 18, 52);
+    octx.restore();
   }
 }
 
-/* ---------- UI wiring ---------- */
+// Map a ROI point (sx,sy) back to screen coords for drawing
+function roiToScreen(sx,sy, P0, basis, pad, band){
+  const {utx,uty,unx,uny} = basis; const [x0,y0]=P0;
+  const s = sx - pad; const r = sy - band; // remove ROI offsets
+  const x = x0 + utx*s + unx*r;
+  const y = y0 + uty*s + uny*r;
+  return [x,y];
+}
+
+function drawStripeOverlay(rim, basis, pad, band, gh, roiW, roiH, actTop, actBot){
+  const P0=[rim.x1,rim.y1];
+  // Draw the two bands as translucent quads
+  const topY0 = band - Math.floor(band/2);
+  const topY1 = topY0 + band;
+  const botY0 = band + gh - Math.floor(band/2);
+  const botY1 = botY0 + band;
+
+  function drawQuad(y0,y1, fill){
+    const [x0a,y0a]=roiToScreen(0,y0,P0,basis,pad,band);
+    const [x1a,y1a]=roiToScreen(roiW,y0,P0,basis,pad,band);
+    const [x0b,y0b]=roiToScreen(roiW,y1,P0,basis,pad,band);
+    const [x1b,y1b]=roiToScreen(0,y1,P0,basis,pad,band);
+    octx.save(); octx.fillStyle=fill; octx.beginPath(); octx.moveTo(x0a,y0a); octx.lineTo(x1a,y1a); octx.lineTo(x0b,y0b); octx.lineTo(x1b,y1b); octx.closePath(); octx.fill(); octx.restore();
+  }
+
+  drawQuad(topY0, topY1, 'rgba(112,225,255,0.16)');
+  drawQuad(botY0, botY1, 'rgba(112,225,255,0.16)');
+
+  if(els.showCols.checked){
+    // draw active columns as small ticks across the bands
+    for(let x=0;x<roiW;x++){
+      if(actTop[x]){
+        const [sx0,sy0]=roiToScreen(x, topY0, P0, basis, pad, band);
+        const [sx1,sy1]=roiToScreen(x, topY1, P0, basis, pad, band);
+        octx.strokeStyle='rgba(255,100,100,0.9)'; octx.lineWidth=2; octx.beginPath(); octx.moveTo(sx0,sy0); octx.lineTo(sx1,sy1); octx.stroke();
+      }
+      if(actBot[x]){
+        const [sx0,sy0]=roiToScreen(x, botY0, P0, basis, pad, band);
+        const [sx1,sy1]=roiToScreen(x, botY1, P0, basis, pad, band);
+        octx.strokeStyle='rgba(100,255,140,0.9)'; octx.lineWidth=2; octx.beginPath(); octx.moveTo(sx0,sy0); octx.lineTo(sx1,sy1); octx.stroke();
+      }
+    }
+  }
+}
+
+// ===== UI wiring =====
 els.btnStart.addEventListener('click', startCam);
 els.btnStop.addEventListener('click', stopAll);
 els.btnCalib.addEventListener('click', startCalibration);
 els.btnEdit.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } editing=!editing; draw(); setStatus(editing?'Editing: drag endpoints':''); });
 els.btnDetect.addEventListener('click', ()=>{ if(!rimLine){ alert('Calibrate first.'); return; } detecting=true; editing=false; setStatus('Detecting…'); });
 
-/* ---------- Init ---------- */
-window.addEventListener('load', ()=> setStatus('Load complete. Start camera → Calibrate rim → Start detection.'));
+// ===== Init =====
+window.addEventListener('load', ()=> setStatus('Start camera → Calibrate rim → Start detection. Tip: Gate 140, Band 10, Motion 12–16.'));
 </script>
 </body>
 </html>
