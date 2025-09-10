@@ -5,46 +5,148 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
   <title>Mini Hoop Shot Detector</title>
   <style>
-    canvas.overlay { position:absolute; inset:0; width:100%; height:100%; background:transparent; }
-    .calib-overlay{position:absolute; inset:0; display:none; align-items:center; justify-content:center; backdrop-filter:blur(0px); pointer-events:none}
+    :root{ --bg:#0b0e13; --panel:#121722; --ink:#e8eefc; --muted:#9fb0d5; --accent:#70e1ff; --ok:#45f0a0; }
+    html,body{height:100%}
+    body{margin:0; font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; background:#0b0e13; color:var(--ink)}
+    .wrap{max-width:960px; margin:0 auto; padding:16px; display:grid; gap:14px}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.025)); border:1px solid rgba(255,255,255,.08); border-radius:16px; box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    header.card{padding:12px 14px; display:flex; justify-content:space-between; align-items:center}
+    header h1{font-size:18px; margin:0}
+
+    /* VIDEO + OVERLAY ARE NOW LAYERED */
+    .video-area{ position:relative; border-radius:16px; overflow:hidden }
+    .video-area video{ display:block; width:100%; height:auto; background:#000 }
+    .video-area canvas.overlay{ position:absolute; inset:0; width:100%; height:100%; pointer-events:auto; background:transparent }
+
+    .controls{display:flex; flex-wrap:wrap; gap:10px; padding:10px; align-items:center}
+    button{appearance:none; border:1px solid rgba(255,255,255,.14); background:#1b2231; color:var(--ink); padding:10px 14px; border-radius:12px; font-weight:600; cursor:pointer}
+    button.primary{background:linear-gradient(180deg, #2b7cff, #225de0)}
+    button.danger{background:linear-gradient(180deg, #ff4d6d, #e03a58)}
+
+    .stats{margin-left:auto; display:flex; gap:12px; color:var(--muted); font-size:14px}
+    .pill{background:#0f1624; border:1px solid rgba(255,255,255,.1); padding:6px 10px; border-radius:999px}
+    .toast{position:fixed; left:50%; top:16px; transform:translateX(-50%) translateY(-20px); opacity:0; background:#10161f; border:1px solid rgba(255,255,255,.14); padding:12px 16px; border-radius:14px; font-weight:700; transition:all .3s ease; z-index:10}
+    .toast.show{transform:translateX(-50%) translateY(0); opacity:1}
+
+    .help{padding:12px 16px; color:var(--muted); font-size:14px}
   </style>
 </head>
 <body>
-  <video id="video" playsinline muted></video>
-  <canvas class="overlay" id="overlay"></canvas>
-  <div class="calib-overlay" id="calibOverlay">
-    <div class="calib-msg">Tap two points across the rim to set the detection line</div>
+  <div class="wrap">
+    <header class="card">
+      <h1>Mini Hoop Shot Detector</h1>
+      <span>Prototype</span>
+    </header>
+
+    <section class="video-area card" id="videoArea">
+      <video id="video" playsinline muted></video>
+      <canvas class="overlay" id="overlay"></canvas>
+    </section>
+
+    <section class="card">
+      <div class="controls">
+        <button id="btnStart" class="primary">Start camera</button>
+        <button id="btnCalib">Calibrate rim line</button>
+        <button id="btnDetect" disabled>Start detection</button>
+        <button id="btnStop" class="danger" disabled>Stop</button>
+        <div class="stats">
+          <span class="pill">FPS: <span id="fps">0</span></span>
+          <span class="pill">Motion: <span id="motion">0</span></span>
+          <span class="pill">Baskets: <span id="count">0</span></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="help card">
+      <strong>How to use</strong>
+      <ol>
+        <li>Tap <em>Start camera</em> and allow camera access.</li>
+        <li>Tap <em>Calibrate rim line</em> and then tap **exactly on the video** (it has a transparent overlay on top). First tap = left rim edge, second tap = right rim edge.</li>
+        <li>Tap <em>Start detection</em>. When the ball passes downward through the line, you’ll hear “Nice shot!”.</li>
+      </ol>
+    </section>
+
+    <div class="toast" id="toast">Nice shot! 🏀</div>
   </div>
-  <button id="btnCalib">Calibrate rim line</button>
 
   <script>
-    const overlay = document.getElementById('overlay');
-    const calibOverlay = document.getElementById('calibOverlay');
-    const btnCalib = document.getElementById('btnCalib');
+    const els = {
+      video: document.getElementById('video'),
+      overlay: document.getElementById('overlay'),
+      btnStart: document.getElementById('btnStart'),
+      btnCalib: document.getElementById('btnCalib'),
+      btnDetect: document.getElementById('btnDetect'),
+      btnStop: document.getElementById('btnStop'),
+      fps: document.getElementById('fps'),
+      motion: document.getElementById('motion'),
+      count: document.getElementById('count'),
+      toast: document.getElementById('toast'),
+      videoArea: document.getElementById('videoArea')
+    };
 
-    function startCalibration(){
-      calibOverlay.classList.add('active');
-      const points = [];
-      function onTap(ev){
-        const rect = overlay.getBoundingClientRect();
-        const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
-        const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY;
-        const x = (clientX - rect.left) * (overlay.width/rect.width);
-        const y = (clientY - rect.top) * (overlay.height/rect.height);
-        points.push({x,y});
-        console.log('Tap',x,y);
-        if(points.length===2){
-          calibOverlay.classList.remove('active');
-          overlay.removeEventListener('click',onTap);
-          overlay.removeEventListener('touchstart',onTap);
-          alert('Calibration set!');
-        }
-      }
-      overlay.addEventListener('click', onTap);
-      overlay.addEventListener('touchstart', onTap, {passive:false});
+    let stream=null, anim=null, running=false, detecting=false;
+    let lastTime=performance.now(), frames=0;
+
+    const work = document.createElement('canvas');
+    const wctx = work.getContext('2d', { willReadFrequently: true });
+    const octx = els.overlay.getContext('2d');
+
+    const SCALE = 0.4, THRESH = 28, MIN_AREA = 260;
+    let rimLine = null; // {x1,y1,x2,y2}
+    const history = [];
+
+    function showToast(){ els.toast.classList.add('show'); setTimeout(()=>els.toast.classList.remove('show'), 1200); }
+    function speak(t){ try{ const u=new SpeechSynthesisUtterance(t); u.rate=1; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){} }
+
+    async function startCam(){
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false });
+        els.video.srcObject = stream; await els.video.play();
+        syncCanvasSize();
+        window.addEventListener('resize', syncCanvasSize);
+        els.video.addEventListener('loadedmetadata', syncCanvasSize);
+        running = true; detecting=false; els.btnDetect.disabled=false; els.btnStop.disabled=false; els.btnStart.disabled=true; loop();
+      }catch(err){ alert('Camera error: '+err.message); }
     }
 
-    btnCalib.addEventListener('click', startCalibration);
+    function stopAll(){ detecting=false; running=false; if(anim) cancelAnimationFrame(anim); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } els.btnStart.disabled=false; els.btnDetect.disabled=true; els.btnStop.disabled=true; }
+
+    function syncCanvasSize(){
+      // Match the drawing buffer to the video’s intrinsic size
+      const vw = els.video.videoWidth || 1280; const vh = els.video.videoHeight || 720;
+      els.overlay.width = vw; els.overlay.height = vh;
+      work.width = Math.round(vw * SCALE); work.height = Math.round(vh * SCALE);
+    }
+
+    function drawLine(ctx,x1,y1,x2,y2,color='#70e1ff'){ ctx.save(); ctx.lineWidth=4; ctx.strokeStyle=color; ctx.setLineDash([8,6]); ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); ctx.restore(); }
+
+    function loop(){ if(!running) return; anim = requestAnimationFrame(loop); if(els.video.readyState<2) return; octx.clearRect(0,0,els.overlay.width,els.overlay.height); if(rimLine){ drawLine(octx,rimLine.x1,rimLine.y1,rimLine.x2,rimLine.y2); }
+      frames++; const now=performance.now(); if(now-lastTime>500){ els.fps.textContent=Math.round((frames*1000)/(now-lastTime)); frames=0; lastTime=now; }
+      if(!detecting) return;
+      wctx.drawImage(els.video,0,0,work.width,work.height); const curr=wctx.getImageData(0,0,work.width,work.height);
+      if(!loop.prev){ loop.prev=curr; return; } const prev=loop.prev;
+      let moved=0,sumX=0,sumY=0; const dc=curr.data, dp=prev.data; for(let i=0;i<dc.length;i+=4){ const dr=dc[i]-dp[i], dg=dc[i+1]-dp[i+1], db=dc[i+2]-dp[i+2]; const diff=Math.abs(dr)+Math.abs(dg)+Math.abs(db); if(diff>THRESH){ const idx=i/4, x=idx%work.width, y=Math.floor(idx/work.width); moved++; sumX+=x; sumY+=y; } }
+      loop.prev=curr; els.motion.textContent=moved;
+      if(moved>MIN_AREA){ const cx=(sumX/moved)/SCALE, cy=(sumY/moved)/SCALE; octx.save(); octx.fillStyle='#45f0a0'; octx.beginPath(); octx.arc(cx,cy,8,0,Math.PI*2); octx.fill(); octx.restore();
+        if(rimLine){ const side = pointSideOfLine(cx,cy,rimLine); history.push({t:now,side,y:cy}); while(history.length && now-history[0].t>900) history.shift(); const hadAbove=history.some(h=>h.side<0), hadBelow=history.some(h=>h.side>0); const first=history[0], recent=history[history.length-1]; const downward=(recent&&first)?(recent.y-first.y)>20:false; if(hadAbove&&hadBelow&&downward){ if(!loop.lastTrigger||now-loop.lastTrigger>1200){ loop.lastTrigger=now; els.count.textContent=parseInt(els.count.textContent,10)+1; showToast(); speak('Nice shot'); history.length=0; } } }
+      }
+    }
+
+    function pointSideOfLine(px,py,line){ return Math.sign( (line.x2-line.x1)*(py-line.y1) - (line.y2-line.y1)*(px-line.x1) ); }
+
+    // Calibration uses the overlay which sits ON TOP of the video
+    function startCalibration(){ if(!els.video.videoWidth){ alert('Start camera first.'); return; } const points=[]; function onTap(ev){ ev.preventDefault(); const rect=els.overlay.getBoundingClientRect(); const clientX = ev.touches? ev.touches[0].clientX : ev.clientX; const clientY = ev.touches? ev.touches[0].clientY : ev.clientY; const x=(clientX-rect.left)*(els.overlay.width/rect.width); const y=(clientY-rect.top)*(els.overlay.height/rect.height); points.push({x,y}); if(points.length===2){ els.overlay.removeEventListener('click',onTap); els.overlay.removeEventListener('touchstart',onTap); rimLine={x1:points[0].x,y1:points[0].y,x2:points[1].x,y2:points[1].y}; drawLine(octx,rimLine.x1,rimLine.y1,rimLine.x2,rimLine.y2); els.btnDetect.disabled=false; } }
+      els.overlay.addEventListener('click', onTap, {passive:false}); els.overlay.addEventListener('touchstart', onTap, {passive:false}); }
+
+    function startDetection(){ if(!rimLine){ alert('Calibrate the rim line first.'); return; } detecting=true; }
+
+    els.btnStart.addEventListener('click', startCam);
+    els.btnStop.addEventListener('click', stopAll);
+    els.btnCalib.addEventListener('click', startCalibration);
+    els.btnDetect.addEventListener('click', startDetection);
+
+    // Helpful on iOS Safari to keep taps aligned when rotating
+    window.addEventListener('orientationchange', ()=> setTimeout(syncCanvasSize, 250));
   </script>
 </body>
 </html>
